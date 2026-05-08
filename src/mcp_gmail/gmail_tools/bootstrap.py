@@ -60,7 +60,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from .. import oauth_state
+from .. import oauth_state, pkce
 from ..config import Settings
 from ..db import session_scope
 from ..state_store import create_nonce
@@ -140,11 +140,17 @@ async def handle_connect_gmail_account(
             account_email=account_email,
         )
 
+    # PKCE: mirror /oauth/start. Verifier rides inside the HMAC state;
+    # challenge goes on the auth URL. No log line for the verifier.
+    code_verifier = pkce.generate_verifier()
+    code_challenge = pkce.compute_challenge(code_verifier)
+
     state = oauth_state.sign_state(
         nonce=nonce,
         auth0_sub=auth0_sub,
         account_email=account_email,
         signing_key=settings.state_signing_key,
+        code_verifier=code_verifier,
     )
     auth_url = oauth_state.build_authorization_url(
         client_id=settings.google_oauth_client_id,
@@ -152,6 +158,7 @@ async def handle_connect_gmail_account(
         scopes=list(settings.gmail_oauth_scopes),
         state=state,
         login_hint=account_email,
+        code_challenge=code_challenge,
     )
     # No log line for the URL or state. The dispatcher's outcome-side
     # audit() call records tool=connect_gmail_account + auth0_sub +

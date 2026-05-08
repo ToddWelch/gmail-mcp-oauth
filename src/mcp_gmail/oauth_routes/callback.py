@@ -68,6 +68,14 @@ async def oauth2callback(
         logger.info("oauth2callback: state verification failed: %s", exc)
         return callback_html(False, "Connection state was invalid or expired. Please retry.")
 
+    # PKCE: state tokens minted before PKCE rollout have no `v` field.
+    # Hard-reject rather than silently downgrade so the security
+    # property holds for every accepted callback. The deploy window is
+    # short and the user can simply restart the flow.
+    if ctx.code_verifier is None:
+        logger.info("oauth2callback: state missing pkce verifier (legacy)")
+        return callback_html(False, "Connection state was invalid or expired. Please retry.")
+
     # Single-use nonce check. Atomically marks the nonce consumed.
     with session_scope() as session:
         consumed = consume_nonce(session, ctx.nonce)
@@ -96,6 +104,7 @@ async def oauth2callback(
             client_secret=settings.google_oauth_client_secret,
             code=code,
             redirect_uri=settings.google_oauth_redirect_url,
+            code_verifier=ctx.code_verifier,
             timeout=settings.http_timeout_seconds,
         )
     except oauth_http.GoogleOAuthError as exc:
