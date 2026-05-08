@@ -13,7 +13,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
 
-from .. import oauth_state
+from .. import oauth_state, pkce
 from ..db import session_scope
 from ..state_store import create_nonce
 from ._helpers import require_bearer
@@ -72,11 +72,19 @@ async def oauth_start(
     with session_scope() as session:
         nonce = create_nonce(session, auth0_sub=auth0_sub, account_email=email)
 
+    # PKCE: mint per-flow verifier + S256 challenge. Verifier stays in
+    # the HMAC-signed state; challenge goes on the auth URL. Never log
+    # the verifier (audit() has no `code_verifier` kwarg, structurally
+    # blocking misuse; this site has no log line for it either).
+    code_verifier = pkce.generate_verifier()
+    code_challenge = pkce.compute_challenge(code_verifier)
+
     state = oauth_state.sign_state(
         nonce=nonce,
         auth0_sub=auth0_sub,
         account_email=email,
         signing_key=settings.state_signing_key,
+        code_verifier=code_verifier,
     )
     auth_url = oauth_state.build_authorization_url(
         client_id=settings.google_oauth_client_id,
@@ -84,6 +92,7 @@ async def oauth_start(
         scopes=list(settings.gmail_oauth_scopes),
         state=state,
         login_hint=email,
+        code_challenge=code_challenge,
     )
     # Audit log: never log the state token (contains the nonce; even
     # though single-use, no need to expose). auth0_sub + email are

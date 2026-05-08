@@ -104,6 +104,7 @@ async def exchange_code(
     client_secret: str,
     code: str,
     redirect_uri: str,
+    code_verifier: str | None = None,
     timeout: float = 10.0,
     client: httpx.AsyncClient | None = None,
 ) -> TokenResponse:
@@ -111,6 +112,9 @@ async def exchange_code(
 
     The httpx client is injectable for tests via respx. When not
     supplied, a short-lived AsyncClient is constructed for this call.
+
+    When `code_verifier` is supplied it is appended to the form body;
+    Google checks it against `code_challenge` (RFC 7636 §4.6).
     """
     body = {
         "code": code,
@@ -119,6 +123,8 @@ async def exchange_code(
         "redirect_uri": redirect_uri,
         "grant_type": "authorization_code",
     }
+    if code_verifier is not None:
+        body["code_verifier"] = code_verifier
     return await _post_token_request(body, timeout=timeout, client=client)
 
 

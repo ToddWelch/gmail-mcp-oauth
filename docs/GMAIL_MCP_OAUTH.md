@@ -123,15 +123,24 @@ The two layers compose: an allowlisted attacker who phishes an allowlisted victi
 
 Single-user residual risk: in the current single-user deployment, the allowlist length is 1, the confirmation page is dormant, and the consent-phishing risk is bounded by Layer 1 alone. The architectural fix in code (Layer 2) means the multi-user transition does not require a separate "remember to ship the consent-phishing fix" hop.
 
-### Why no PKCE today
+### PKCE (RFC 7636)
 
-Confidential clients (server-side mcp-gmail with a `client_secret` that never reaches the browser) are not strictly required to use PKCE. Google supports it and it is the single biggest follow-up worth tracking. The current state HMAC + single-use nonce + sub fingerprint chain gives equivalent CSRF protection against the documented threat model.
+The service runs PKCE on every authorization-code flow. Confidential clients (server-side mcp-gmail with a `client_secret` that never reaches the browser) are not strictly required to use PKCE, but adopting it closes the residual stolen-code class without operator effort and aligns with OAuth 2.1's direction of travel.
 
-PKCE becomes mandatory if any of the following changes:
+Per-flow shape:
 
-- The service is ever deployed in a configuration where `GOOGLE_OAUTH_CLIENT_SECRET` could plausibly leak (e.g. a bundled CLI build, a public client). Today this is server-side only.
-- Google's OAuth 2.1 deprecation timeline removes the implicit grant of CSRF protection that the state nonce currently provides. We monitor the upstream OAuth 2.1 spec progress.
-- A future review or operator decision flags it as a hardening task. The shape of the addition (compute and store a code verifier alongside the nonce, send the code challenge in the start URL, send the verifier in the token exchange) is well-known and can be a small follow-up PR.
+1. `/oauth/start` (and the `connect_gmail_account` MCP tool) calls `pkce.generate_verifier()` to mint a fresh 64-character base64url code verifier, then `pkce.compute_challenge(verifier)` to derive the S256 challenge.
+2. The verifier is embedded inside the HMAC-signed state token under the `v` field. It rides round-trip in the state blob; no DB column is added. The state HMAC integrity-protects the verifier the same way it protects `nonce` / `sub` / `email`.
+3. `build_authorization_url` appends `code_challenge=<challenge>` and `code_challenge_method=S256` to the consent URL.
+4. `/oauth2callback` verifies state (HMAC + nonce + fingerprint), extracts `ctx.code_verifier`, and passes it as the `code_verifier` form field to Google's token endpoint. Google checks it against the challenge it saw at consent time.
+
+The verifier is treated as a flow-scoped secret. It is never logged at any level: there is no log call that takes the verifier as a value, the `audit()` helper's keyword-only signature has no `code_verifier` parameter (so a future regression that tries to add one would raise `TypeError` at runtime), and the redacting filter in `logging_filters.py` is the defense-in-depth backstop. On the wire, the verifier appears only inside the form-urlencoded POST to Google's token endpoint over TLS.
+
+`refresh_access_token` does not use PKCE. RFC 7636 applies to the authorization-code grant only; refresh-token grants are a separate flow with its own integrity protections (the refresh token itself is the secret bound to the original consent).
+
+Legacy state tokens (minted before this rollout) have no `v` field. `verify_state` decodes them with `code_verifier=None`, and `/oauth2callback` hard-rejects rather than silently downgrade. The deploy window is short and the user can simply restart the flow; the security property holds for every accepted callback.
+
+`STATE_SIGNING_KEY` rotation falls into the existing HMAC-failure path: a state minted under the old key fails signature verification under the new key and the user is sent through `/oauth/start` again, which mints a fresh state under the rotated key.
 
 ### Scope downgrade
 

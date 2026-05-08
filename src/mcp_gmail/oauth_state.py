@@ -89,6 +89,9 @@ class AuthorizationContext:
     account_email: str
     sub_fingerprint: str
     iat: int
+    # PKCE verifier minted at /oauth/start. None for legacy pre-PKCE
+    # state; callback.py hard-rejects so None never reaches token swap.
+    code_verifier: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -145,15 +148,16 @@ def sign_state(
     account_email: str,
     signing_key: str,
     iat: int | None = None,
+    code_verifier: str | None = None,
 ) -> str:
     """Build the OAuth `state` parameter as a signed token.
 
     Layout: base64url(canonical_payload).base64url(hmac_signature)
 
-    The payload binds (nonce, auth0_sub, account_email, fingerprint,
-    iat). On callback, verify_state() checks the HMAC, the iat clock
-    window, and the fingerprint, then returns the parsed payload so
-    the caller can consume the nonce in state_store.
+    Payload binds (nonce, auth0_sub, account_email, fingerprint, iat)
+    and, when supplied, the PKCE code_verifier as field `v`. The
+    verifier travels round-trip inside the HMAC blob so no DB column
+    / second crypto primitive is needed.
     """
     if not signing_key:
         raise ValueError("signing_key is required")
@@ -165,6 +169,8 @@ def sign_state(
         "f": compute_sub_fingerprint(auth0_sub, account_email, signing_key),
         "iat": iat_value,
     }
+    if code_verifier is not None:
+        payload["v"] = code_verifier
     payload_bytes = _canonicalize_state(payload)
     payload_b64 = _b64url_encode(payload_bytes)
     sig = _hmac_sign(signing_key, payload_bytes)
@@ -217,12 +223,18 @@ def verify_state(state: str, signing_key: str) -> AuthorizationContext:
     if not hmac.compare_digest(expected_fp.encode("ascii"), str(payload["f"]).encode("ascii")):
         raise StateVerificationError("state fingerprint mismatch")
 
+    # `v` (PKCE verifier) is optional for back-compat with pre-PKCE
+    # state tokens; callback.py hard-rejects when None.
+    raw_verifier = payload.get("v")
+    code_verifier = str(raw_verifier) if isinstance(raw_verifier, str) else None
+
     return AuthorizationContext(
         nonce=str(payload["n"]),
         auth0_sub=str(payload["s"]),
         account_email=str(payload["e"]),
         sub_fingerprint=str(payload["f"]),
         iat=iat,
+        code_verifier=code_verifier,
     )
 
 
@@ -238,6 +250,7 @@ def build_authorization_url(
     scopes: list[str] | tuple[str, ...],
     state: str,
     login_hint: str | None = None,
+    code_challenge: str | None = None,
 ) -> str:
     """Return the Google OAuth consent URL with `state` already encoded.
 
@@ -247,6 +260,9 @@ def build_authorization_url(
     `include_granted_scopes=true` is set so an existing user who has
     already granted some scopes does not get a redundant consent
     screen for those scopes.
+
+    When `code_challenge` is supplied, `code_challenge_method=S256` is
+    hard-coded (the only PKCE method this code supports).
     """
     if not client_id or not redirect_uri:
         raise ValueError("client_id and redirect_uri are required")
@@ -264,6 +280,9 @@ def build_authorization_url(
     }
     if login_hint:
         params["login_hint"] = login_hint
+    if code_challenge is not None:
+        params["code_challenge"] = code_challenge
+        params["code_challenge_method"] = "S256"
     return f"{AUTHORIZE_URL}?{urlencode(params)}"
 
 
