@@ -19,6 +19,7 @@ dependencies = [
     "alembic>=1.13",
     "psycopg[binary]>=3.2",
     "cryptography>=42",
+    "jsonschema>=4.21",
 ]
 
 [project.optional-dependencies]
