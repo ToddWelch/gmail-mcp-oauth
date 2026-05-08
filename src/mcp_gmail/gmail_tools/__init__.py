@@ -10,9 +10,14 @@ The combined manifests export 32 tools, grouped for users as:
      get_or_create_label, create_filter_from_template)
   -  1 bootstrap tool (connect_gmail_account)
 
-The same 32 entries are split across four manifest files for
+The same 32 entries are split across five manifest files for
 file-size discipline:
-  - `tool_definitions.py` hosts 11 single-shot read tools.
+  - `tool_definitions.py` hosts 8 message and thread read tools
+    natively and splices in `tool_definitions_labels_filters.py`
+    so its public list still exports all 11 single-shot read tools.
+  - `tool_definitions_labels_filters.py` hosts the 3 label and
+    filter read tools (`list_email_labels`, `list_filters`,
+    `get_filter`).
   - `tool_definitions_extras.py` hosts the 2 fanout read tools
     (`multi_search_emails`, `batch_read_emails`).
   - `tool_definitions_write.py` hosts 18 entries (the 14 write tools
