@@ -69,7 +69,7 @@ async def test_get_inbox_with_threads_expands_each(client):
                     "id": "t1",
                     "messages": [
                         {
-                            "id": "m1",
+                            "id": "M1",
                             "snippet": "snip-t1",
                             "payload": {
                                 "headers": [
@@ -89,7 +89,7 @@ async def test_get_inbox_with_threads_expands_each(client):
                     "id": "t2",
                     "messages": [
                         {
-                            "id": "m2",
+                            "id": "M2",
                             "snippet": "snip-t2",
                             "payload": {"headers": []},
                         }

@@ -147,15 +147,15 @@ async def test_route_delete_label(client):
 @pytest.mark.asyncio
 async def test_route_modify_email_labels(client):
     with respx.mock(base_url=GMAIL_API_BASE) as router:
-        router.post("/users/me/messages/m1/modify").mock(
-            return_value=httpx.Response(200, json={"id": "m1"})
+        router.post("/users/me/messages/M1/modify").mock(
+            return_value=httpx.Response(200, json={"id": "M1"})
         )
         r = await route_tool(
             tool_name="modify_email_labels",
-            arguments={"message_id": "m1", "add_label_ids": ["INBOX"]},
+            arguments={"message_id": "M1", "add_label_ids": ["INBOX"]},
             client=client,
         )
-    assert r["id"] == "m1"
+    assert r["id"] == "M1"
 
 
 @pytest.mark.asyncio
@@ -185,13 +185,13 @@ async def test_route_delete_filter(client):
 @pytest.mark.asyncio
 async def test_route_delete_email(client):
     with respx.mock(base_url=GMAIL_API_BASE) as router:
-        router.post("/users/me/messages/m1/trash").mock(
-            return_value=httpx.Response(200, json={"id": "m1"})
+        router.post("/users/me/messages/M1/trash").mock(
+            return_value=httpx.Response(200, json={"id": "M1"})
         )
         r = await route_tool(
-            tool_name="delete_email", arguments={"message_id": "m1"}, client=client
+            tool_name="delete_email", arguments={"message_id": "M1"}, client=client
         )
-    assert r["id"] == "m1"
+    assert r["id"] == "M1"
 
 
 @pytest.mark.asyncio
@@ -206,7 +206,7 @@ async def test_route_batch_delete_emails(client):
         router.post("/users/me/messages/batchModify").mock(side_effect=handler)
         r = await route_tool(
             tool_name="batch_delete_emails",
-            arguments={"message_ids": ["m1", "m2"]},
+            arguments={"message_ids": ["M1", "M2"]},
             client=client,
         )
     assert r == {}
@@ -319,7 +319,7 @@ async def test_route_reply_all(client):
                             {"name": "From", "value": "alice@example.com"},
                             {"name": "To", "value": "me@x.com"},
                             {"name": "Subject", "value": "Hello"},
-                            {"name": "Message-ID", "value": "<m1@example.com>"},
+                            {"name": "Message-ID", "value": "<M1@example.com>"},
                         ]
                     },
                 },
@@ -357,7 +357,7 @@ async def test_route_batch_modify_emails(client):
         r = await route_tool(
             tool_name="batch_modify_emails",
             arguments={
-                "message_ids": ["m1", "m2"],
+                "message_ids": ["M1", "M2"],
                 "add_label_ids": ["IMPORTANT"],
             },
             client=client,

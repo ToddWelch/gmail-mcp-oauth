@@ -126,7 +126,7 @@ async def test_tools_call_error_dict_becomes_jsonrpc_error():
             "method": "tools/call",
             "params": {
                 "name": "read_email",
-                "arguments": {"account_email": "x@example.com", "message_id": "m1"},
+                "arguments": {"account_email": "x@example.com", "message_id": "M1"},
             },
         }
         response = await mcp_protocol.handle_jsonrpc(msg, claims={"sub": "user-a"})
@@ -150,7 +150,7 @@ async def test_tools_call_dispatch_exception_becomes_internal_error():
             "method": "tools/call",
             "params": {
                 "name": "read_email",
-                "arguments": {"account_email": "x@example.com", "message_id": "m1"},
+                "arguments": {"account_email": "x@example.com", "message_id": "M1"},
             },
         }
         response = await mcp_protocol.handle_jsonrpc(msg, claims={"sub": "user-a"})

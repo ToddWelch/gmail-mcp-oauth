@@ -147,7 +147,7 @@ async def test_multi_search_passes_through_next_page_token_and_estimate(client):
         return httpx.Response(
             200,
             json={
-                "messages": [{"id": "m1"}],
+                "messages": [{"id": "M1"}],
                 "nextPageToken": "next-abc",
                 "resultSizeEstimate": 17,
             },

@@ -31,7 +31,7 @@ async def test_create_draft_posts_to_drafts(client):
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured["body"] = json.loads(request.read().decode())
-        return httpx.Response(200, json={"id": "d1", "message": {"id": "m1"}})
+        return httpx.Response(200, json={"id": "d1", "message": {"id": "M1"}})
 
     with respx.mock(base_url=GMAIL_API_BASE) as router:
         router.post("/users/me/drafts").mock(side_effect=handler)
@@ -219,7 +219,7 @@ async def test_create_draft_sets_message_thread_id_when_provided(client):
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured["body"] = json.loads(request.read().decode())
-        return httpx.Response(200, json={"id": "d1", "message": {"id": "m1", "threadId": "T123"}})
+        return httpx.Response(200, json={"id": "d1", "message": {"id": "M1", "threadId": "T123"}})
 
     with respx.mock(base_url=GMAIL_API_BASE) as router:
         router.post("/users/me/drafts").mock(side_effect=handler)
