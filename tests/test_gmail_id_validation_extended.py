@@ -6,7 +6,10 @@ ceiling. This file exercises the declarative side of the gate: the
 JSON Schema `pattern` declared on every Gmail-ID-shaped tool input.
 
 Targets:
-- src/mcp_gmail/gmail_tools/tool_definitions.py (5 fields)
+- src/mcp_gmail/gmail_tools/tool_definitions.py (4 fields, message
+  and thread read tools after the labels/filters split)
+- src/mcp_gmail/gmail_tools/tool_definitions_labels_filters.py
+  (1 field, the `get_filter.filter_id` pattern)
 - src/mcp_gmail/gmail_tools/tool_definitions_write.py (4 fields)
 - src/mcp_gmail/gmail_tools/tool_definitions_admin.py (6 fields)
 - src/mcp_gmail/gmail_tools/tool_definitions_admin_cleanup.py (2 fields)
