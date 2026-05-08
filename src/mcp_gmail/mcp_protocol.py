@@ -24,6 +24,7 @@ from typing import Any
 from . import config as config_module
 from .gmail_tools import TOOL_DEFINITIONS as _GMAIL_TOOL_DEFINITIONS
 from .gmail_tools import dispatch_tool_call
+from .gmail_tools._schema_validator import validate_arguments
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +111,22 @@ async def handle_jsonrpc(
             registered = {t["name"] for t in TOOL_DEFINITIONS}
             if tool_name not in registered:
                 return _error_response(req_id, -32601, f"no tool registered: {tool_name}")
+            # JSON Schema validation at the dispatch boundary. Closes
+            # the Codex MEDIUM finding: every tool's `inputSchema` is
+            # now enforced server-side, not just client-side. Coarse
+            # JSON Pointer of the failing field lands in the WARNING
+            # log (validate_arguments writes it); the wire response
+            # carries only the correlation_id, never the offending
+            # value, so reflected-payload DoS is not a vector.
+            field_path = validate_arguments(tool_name, arguments)
+            if field_path is not None:
+                if is_notification:
+                    return None
+                return _error_response(
+                    req_id,
+                    -32602,
+                    f"params.arguments failed schema validation (correlation_id={cid})",
+                )
             settings = config_module.load()
             try:
                 result = await dispatch_tool_call(
