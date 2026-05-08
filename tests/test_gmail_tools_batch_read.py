@@ -40,7 +40,7 @@ async def client():
 @pytest.mark.asyncio
 async def test_batch_read_returns_ordered_messages(client):
     """5 ids fan out into 5 GETs, ordered by input."""
-    ids = ["m1", "m2", "m3", "m4", "m5"]
+    ids = ["M1", "M2", "M3", "M4", "M5"]
 
     def handler(request: httpx.Request) -> httpx.Response:
         path = request.url.path
@@ -48,7 +48,7 @@ async def test_batch_read_returns_ordered_messages(client):
         return httpx.Response(200, json={"id": mid, "threadId": f"t-{mid}"})
 
     with respx.mock(base_url=GMAIL_API_BASE) as router:
-        router.get(re.compile(r"/users/me/messages/m\d+")).mock(side_effect=handler)
+        router.get(re.compile(r"/users/me/messages/M\d+")).mock(side_effect=handler)
         r = await messages_extras.batch_read_emails(client=client, message_ids=ids)
 
     assert "messages" in r
@@ -64,11 +64,11 @@ async def test_batch_read_default_format_is_metadata(client):
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured.append(request.url.params.get("format", ""))
-        return httpx.Response(200, json={"id": "m1"})
+        return httpx.Response(200, json={"id": "M1"})
 
     with respx.mock(base_url=GMAIL_API_BASE) as router:
-        router.get("/users/me/messages/m1").mock(side_effect=handler)
-        await messages_extras.batch_read_emails(client=client, message_ids=["m1"])
+        router.get("/users/me/messages/M1").mock(side_effect=handler)
+        await messages_extras.batch_read_emails(client=client, message_ids=["M1"])
     assert captured == ["metadata"]
 
 
@@ -80,11 +80,11 @@ async def test_batch_read_default_metadata_headers_applied(client):
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured_multi.append(list(request.url.params.multi_items()))
-        return httpx.Response(200, json={"id": "m1"})
+        return httpx.Response(200, json={"id": "M1"})
 
     with respx.mock(base_url=GMAIL_API_BASE) as router:
-        router.get("/users/me/messages/m1").mock(side_effect=handler)
-        await messages_extras.batch_read_emails(client=client, message_ids=["m1"])
+        router.get("/users/me/messages/M1").mock(side_effect=handler)
+        await messages_extras.batch_read_emails(client=client, message_ids=["M1"])
 
     assert len(captured_multi) == 1
     headers = [v for k, v in captured_multi[0] if k == "metadataHeaders"]
@@ -98,13 +98,13 @@ async def test_batch_read_caller_supplied_metadata_headers_pass_through(client):
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured_multi.append(list(request.url.params.multi_items()))
-        return httpx.Response(200, json={"id": "m1"})
+        return httpx.Response(200, json={"id": "M1"})
 
     with respx.mock(base_url=GMAIL_API_BASE) as router:
-        router.get("/users/me/messages/m1").mock(side_effect=handler)
+        router.get("/users/me/messages/M1").mock(side_effect=handler)
         await messages_extras.batch_read_emails(
             client=client,
-            message_ids=["m1"],
+            message_ids=["M1"],
             metadata_headers=["Message-Id", "References"],
         )
 
@@ -119,13 +119,13 @@ async def test_batch_read_format_minimal_does_not_send_metadata_headers(client):
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured_multi.append(list(request.url.params.multi_items()))
-        return httpx.Response(200, json={"id": "m1"})
+        return httpx.Response(200, json={"id": "M1"})
 
     with respx.mock(base_url=GMAIL_API_BASE) as router:
-        router.get("/users/me/messages/m1").mock(side_effect=handler)
+        router.get("/users/me/messages/M1").mock(side_effect=handler)
         await messages_extras.batch_read_emails(
             client=client,
-            message_ids=["m1"],
+            message_ids=["M1"],
             format="minimal",
         )
 
@@ -142,7 +142,7 @@ async def test_batch_read_format_minimal_does_not_send_metadata_headers(client):
 @pytest.mark.asyncio
 async def test_batch_read_partial_failure_surfaces_per_id_error(client):
     """One id 404s; the four other reads succeed; record carries message_id."""
-    ids = ["m1", "m2", "missing", "m4", "m5"]
+    ids = ["M1", "M2", "missing", "M4", "M5"]
 
     def handler(request: httpx.Request) -> httpx.Response:
         mid = request.url.path.rsplit("/", 1)[-1]
@@ -160,14 +160,14 @@ async def test_batch_read_partial_failure_surfaces_per_id_error(client):
     assert failed["error_status"] == 404
     assert "error_message" in failed
     # Successes intact in order.
-    assert r["messages"][0]["id"] == "m1"
-    assert r["messages"][4]["id"] == "m5"
+    assert r["messages"][0]["id"] == "M1"
+    assert r["messages"][4]["id"] == "M5"
 
 
 @pytest.mark.asyncio
 async def test_batch_read_429_carries_retry_after(client):
     """a 429 with Retry-After surfaces retry_after_seconds."""
-    ids = ["m1", "rate"]
+    ids = ["M1", "rate"]
 
     def handler(request: httpx.Request) -> httpx.Response:
         mid = request.url.path.rsplit("/", 1)[-1]
@@ -196,7 +196,7 @@ async def test_batch_read_oversize_rejected_at_handler(client):
         any_route = router.route()
         any_route.mock(return_value=httpx.Response(200, json={}))
         r = await messages_extras.batch_read_emails(
-            client=client, message_ids=[f"m{i}" for i in range(101)]
+            client=client, message_ids=[f"M{i}" for i in range(101)]
         )
         assert any_route.called is False
     assert r["code"] == ToolErrorCode.BAD_REQUEST
@@ -210,7 +210,7 @@ async def test_batch_read_at_cap_passes(client):
         mid = request.url.path.rsplit("/", 1)[-1]
         return httpx.Response(200, json={"id": mid})
 
-    ids = [f"m{i}" for i in range(100)]
+    ids = [f"M{i}" for i in range(100)]
     with respx.mock(base_url=GMAIL_API_BASE) as router:
         router.get(re.compile(r"/users/me/messages/.+")).mock(side_effect=handler)
         r = await messages_extras.batch_read_emails(client=client, message_ids=ids)
@@ -235,7 +235,7 @@ async def test_batch_read_invalid_format_rejected_at_handler(client):
         any_route = router.route()
         any_route.mock(return_value=httpx.Response(200, json={}))
         r = await messages_extras.batch_read_emails(
-            client=client, message_ids=["m1"], format="full"
+            client=client, message_ids=["M1"], format="full"
         )
         assert any_route.called is False
     assert r["code"] == ToolErrorCode.BAD_REQUEST
@@ -319,10 +319,10 @@ async def test_batch_read_handler_entry_malformed_id_surfaces_per_id(client):
     converts it to a per-id error record (NOT a batch failure)."""
     with respx.mock(base_url=GMAIL_API_BASE, assert_all_called=False) as router:
         # The valid ids should still fire; the bad id should not.
-        good_route = router.get(re.compile(r"/users/me/messages/m\d+")).mock(
-            return_value=httpx.Response(200, json={"id": "m1"})
+        good_route = router.get(re.compile(r"/users/me/messages/M\d+")).mock(
+            return_value=httpx.Response(200, json={"id": "M1"})
         )
-        ids = ["m1", "bad id with spaces", "m2"]
+        ids = ["M1", "bad id with spaces", "M2"]
         r = await messages_extras.batch_read_emails(client=client, message_ids=ids)
         assert good_route.called is True
 

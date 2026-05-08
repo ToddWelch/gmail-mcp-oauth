@@ -94,7 +94,7 @@ async def test_dispatch_returns_needs_reauth_when_no_token_row():
     settings = config_module.load()
     result = await dispatch_tool_call(
         tool_name="read_email",
-        arguments={"account_email": "noone@example.com", "message_id": "m1"},
+        arguments={"account_email": "noone@example.com", "message_id": "M1"},
         claims={"sub": "user-a"},
         settings=settings,
     )
@@ -112,7 +112,7 @@ async def test_dispatch_returns_needs_reauth_when_row_revoked():
     settings = config_module.load()
     result = await dispatch_tool_call(
         tool_name="read_email",
-        arguments={"account_email": "x@example.com", "message_id": "m1"},
+        arguments={"account_email": "x@example.com", "message_id": "M1"},
         claims={"sub": "user-a"},
         settings=settings,
     )
@@ -158,7 +158,7 @@ async def test_dispatch_returns_needs_reauth_on_token_unavailable():
     with _stub_token_manager_raises(err):
         result = await dispatch_tool_call(
             tool_name="read_email",
-            arguments={"account_email": "x@example.com", "message_id": "m1"},
+            arguments={"account_email": "x@example.com", "message_id": "M1"},
             claims={"sub": "user-a"},
             settings=settings,
         )
@@ -174,16 +174,16 @@ async def test_dispatch_happy_path_returns_gmail_response():
     )
     with _stub_token_manager_with("access-tok"):
         with respx.mock(base_url=GMAIL_API_BASE) as router:
-            router.get("/users/me/messages/m1").mock(
-                return_value=httpx.Response(200, json={"id": "m1", "snippet": "hi"})
+            router.get("/users/me/messages/M1").mock(
+                return_value=httpx.Response(200, json={"id": "M1", "snippet": "hi"})
             )
             result = await dispatch_tool_call(
                 tool_name="read_email",
-                arguments={"account_email": "x@example.com", "message_id": "m1"},
+                arguments={"account_email": "x@example.com", "message_id": "M1"},
                 claims={"sub": "user-a"},
                 settings=settings,
             )
-    assert result == {"id": "m1", "snippet": "hi"}
+    assert result == {"id": "M1", "snippet": "hi"}
 
 
 @pytest.mark.asyncio
@@ -230,7 +230,7 @@ async def test_dispatch_cross_user_isolation_m5():
     )
     result = await dispatch_tool_call(
         tool_name="read_email",
-        arguments={"account_email": "x@example.com", "message_id": "m1"},
+        arguments={"account_email": "x@example.com", "message_id": "M1"},
         claims={"sub": "user-b"},  # different user
         settings=settings,
     )
@@ -242,7 +242,7 @@ async def test_dispatch_rejects_missing_account_email():
     settings = config_module.load()
     result = await dispatch_tool_call(
         tool_name="read_email",
-        arguments={"message_id": "m1"},
+        arguments={"message_id": "M1"},
         claims={"sub": "user-a"},
         settings=settings,
     )
@@ -254,7 +254,7 @@ async def test_dispatch_rejects_missing_sub_claim():
     settings = config_module.load()
     result = await dispatch_tool_call(
         tool_name="read_email",
-        arguments={"account_email": "x@example.com", "message_id": "m1"},
+        arguments={"account_email": "x@example.com", "message_id": "M1"},
         claims={},
         settings=settings,
     )
@@ -438,7 +438,7 @@ async def test_reply_all_audit_records_message_id(caplog):
                                 {"name": "From", "value": "alice@example.com"},
                                 {"name": "To", "value": "x@example.com"},
                                 {"name": "Subject", "value": "Hi"},
-                                {"name": "Message-ID", "value": "<m1@example.com>"},
+                                {"name": "Message-ID", "value": "<M1@example.com>"},
                             ]
                         },
                     },

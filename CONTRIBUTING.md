@@ -34,6 +34,13 @@ Thanks for your interest in mcp-gmail.
 - Bug fixes ship with a regression test that fails before the fix.
 - `pytest --cov=mcp_gmail` should report >= 90% coverage.
 
+## Design conventions
+
+- Labels like `Decision N` and `Item N` in source comments and
+  docstrings reference design discussions captured in the project's
+  design history. They are first-party design commentary preserved
+  intentionally; do not strip them as stale references.
+
 ## Pull requests
 
 - Open against `main`.

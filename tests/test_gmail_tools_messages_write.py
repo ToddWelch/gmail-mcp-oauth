@@ -39,15 +39,15 @@ async def test_delete_email_calls_trash_endpoint(client):
     def handler(request: httpx.Request) -> httpx.Response:
         captured["method"] = request.method
         captured["path"] = request.url.path
-        return httpx.Response(200, json={"id": "m1", "labelIds": ["TRASH"]})
+        return httpx.Response(200, json={"id": "M1", "labelIds": ["TRASH"]})
 
     with respx.mock(base_url=GMAIL_API_BASE, assert_all_called=False) as router:
-        router.post("/users/me/messages/m1/trash").mock(side_effect=handler)
-        # Make sure DELETE on /users/me/messages/m1 is NOT called.
-        delete_route = router.delete("/users/me/messages/m1").mock(return_value=httpx.Response(204))
-        result = await messages_write.delete_email(client=client, message_id="m1")
+        router.post("/users/me/messages/M1/trash").mock(side_effect=handler)
+        # Make sure DELETE on /users/me/messages/M1 is NOT called.
+        delete_route = router.delete("/users/me/messages/M1").mock(return_value=httpx.Response(204))
+        result = await messages_write.delete_email(client=client, message_id="M1")
     assert captured["method"] == "POST"
-    assert captured["path"].endswith("/messages/m1/trash")
+    assert captured["path"].endswith("/messages/M1/trash")
     assert delete_route.called is False
     assert "TRASH" in result["labelIds"]
 
@@ -86,14 +86,14 @@ async def test_batch_delete_emails_uses_batchModify_with_TRASH_label(client):
         )
         await messages_write.batch_delete_emails(
             client=client,
-            message_ids=["m1", "m2", "m3"],
+            message_ids=["M1", "M2", "M3"],
         )
     assert captured["method"] == "POST"
     assert captured["path"].endswith("/messages/batchModify")
     assert permanent_route.called is False
     body = captured["body"]
     assert isinstance(body, dict)
-    assert body["ids"] == ["m1", "m2", "m3"]
+    assert body["ids"] == ["M1", "M2", "M3"]
     assert body["addLabelIds"] == ["TRASH"]
     # Removing TRASH would be wrong; the call should ONLY add TRASH.
     assert "removeLabelIds" not in body
@@ -116,7 +116,7 @@ async def test_batch_delete_emails_rejects_over_1000_ids(client):
     with respx.mock(base_url=GMAIL_API_BASE, assert_all_called=False) as router:
         any_route = router.route()
         any_route.mock(return_value=httpx.Response(204))
-        ids = [f"m{i}" for i in range(1001)]
+        ids = [f"M{i}" for i in range(1001)]
         r = await messages_write.batch_delete_emails(client=client, message_ids=ids)
         assert any_route.called is False
     assert r["code"] == ToolErrorCode.BAD_REQUEST
@@ -127,7 +127,7 @@ async def test_batch_delete_emails_at_cap_passes(client):
     """Exactly 1000 IDs is allowed."""
     with respx.mock(base_url=GMAIL_API_BASE) as router:
         router.post("/users/me/messages/batchModify").mock(return_value=httpx.Response(204))
-        ids = [f"m{i}" for i in range(1000)]
+        ids = [f"M{i}" for i in range(1000)]
         r = await messages_write.batch_delete_emails(client=client, message_ids=ids)
     assert r == {}
 
@@ -143,13 +143,13 @@ async def test_modify_email_labels_sends_add_and_remove(client):
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured["body"] = json.loads(request.read().decode())
-        return httpx.Response(200, json={"id": "m1", "labelIds": ["INBOX"]})
+        return httpx.Response(200, json={"id": "M1", "labelIds": ["INBOX"]})
 
     with respx.mock(base_url=GMAIL_API_BASE) as router:
-        router.post("/users/me/messages/m1/modify").mock(side_effect=handler)
+        router.post("/users/me/messages/M1/modify").mock(side_effect=handler)
         await messages_write.modify_email_labels(
             client=client,
-            message_id="m1",
+            message_id="M1",
             add_label_ids=["INBOX"],
             remove_label_ids=["UNREAD"],
         )
@@ -164,11 +164,11 @@ async def test_modify_email_labels_no_lists_still_calls_gmail(client):
 
     def handler(request: httpx.Request) -> httpx.Response:
         called["hit"] = True
-        return httpx.Response(200, json={"id": "m1"})
+        return httpx.Response(200, json={"id": "M1"})
 
     with respx.mock(base_url=GMAIL_API_BASE) as router:
-        router.post("/users/me/messages/m1/modify").mock(side_effect=handler)
-        await messages_write.modify_email_labels(client=client, message_id="m1")
+        router.post("/users/me/messages/M1/modify").mock(side_effect=handler)
+        await messages_write.modify_email_labels(client=client, message_id="M1")
     assert called["hit"] is True
 
 
@@ -200,12 +200,12 @@ async def test_batch_modify_emails_sends_caller_label_sets(client):
         router.post("/users/me/messages/batchModify").mock(side_effect=handler)
         await messages_write.batch_modify_emails(
             client=client,
-            message_ids=["m1", "m2"],
+            message_ids=["M1", "M2"],
             add_label_ids=["IMPORTANT"],
             remove_label_ids=["UNREAD"],
         )
     body = captured["body"]
-    assert body["ids"] == ["m1", "m2"]
+    assert body["ids"] == ["M1", "M2"]
     assert body["addLabelIds"] == ["IMPORTANT"]
     assert body["removeLabelIds"] == ["UNREAD"]
 
@@ -230,7 +230,7 @@ async def test_batch_modify_emails_rejects_over_1000_ids(client):
     with respx.mock(base_url=GMAIL_API_BASE, assert_all_called=False) as router:
         any_route = router.route()
         any_route.mock(return_value=httpx.Response(204))
-        ids = [f"m{i}" for i in range(1001)]
+        ids = [f"M{i}" for i in range(1001)]
         r = await messages_write.batch_modify_emails(
             client=client,
             message_ids=ids,
@@ -245,7 +245,7 @@ async def test_batch_modify_emails_at_cap_passes(client):
     """Exactly 1000 IDs is allowed."""
     with respx.mock(base_url=GMAIL_API_BASE) as router:
         router.post("/users/me/messages/batchModify").mock(return_value=httpx.Response(204))
-        ids = [f"m{i}" for i in range(1000)]
+        ids = [f"M{i}" for i in range(1000)]
         r = await messages_write.batch_modify_emails(
             client=client,
             message_ids=ids,
@@ -267,7 +267,7 @@ async def test_batch_modify_emails_rejects_both_empty(client):
         any_route.mock(return_value=httpx.Response(204))
         r = await messages_write.batch_modify_emails(
             client=client,
-            message_ids=["m1"],
+            message_ids=["M1"],
         )
         assert any_route.called is False
     assert r["code"] == ToolErrorCode.BAD_REQUEST
@@ -281,7 +281,7 @@ async def test_batch_modify_emails_rejects_both_empty_lists_passed(client):
         any_route.mock(return_value=httpx.Response(204))
         r = await messages_write.batch_modify_emails(
             client=client,
-            message_ids=["m1"],
+            message_ids=["M1"],
             add_label_ids=[],
             remove_label_ids=[],
         )
@@ -302,7 +302,7 @@ async def test_batch_modify_emails_only_remove_set_is_allowed(client):
         router.post("/users/me/messages/batchModify").mock(side_effect=handler)
         r = await messages_write.batch_modify_emails(
             client=client,
-            message_ids=["m1"],
+            message_ids=["M1"],
             remove_label_ids=["UNREAD"],
         )
     assert r == {}
