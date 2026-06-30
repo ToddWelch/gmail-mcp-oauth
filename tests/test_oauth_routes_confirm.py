@@ -149,7 +149,9 @@ def _drive_to_callback(
 
 def test_single_user_mode_persists_inline(single_user_client, signed_jwt):
     """Allowlist length 1 keeps requires_confirm_page=False and the
-    callback writes directly into gmail_oauth_tokens."""
+    callback writes directly into gmail_oauth_tokens. Success now uses
+    Post/Redirect/Get: a 303 to the static /oauth/connected page instead
+    of an inline 200, so a browser reload is reload-safe."""
     resp = _drive_to_callback(
         single_user_client,
         signed_jwt,
@@ -157,8 +159,8 @@ def test_single_user_mode_persists_inline(single_user_client, signed_jwt):
         requested_email="user@example.com",
         actual_email="user@example.com",
     )
-    assert resp.status_code == 200
-    assert b"Connected" in resp.content
+    assert resp.status_code == 303
+    assert resp.headers["location"].startswith("/oauth/connected")
 
     fresh = db_module._SessionFactory()
     try:
@@ -234,7 +236,8 @@ def test_confirm_get_renders_page(multi_user_client, signed_jwt):
 
 def test_confirm_post_confirm_persists_token(multi_user_client, signed_jwt):
     """POST action=confirm consumes the pending row and creates the
-    gmail_oauth_tokens row."""
+    gmail_oauth_tokens row. Success now uses Post/Redirect/Get: a 303 to
+    the static /oauth/connected page instead of an inline 200."""
     resp = _drive_to_callback(
         multi_user_client,
         signed_jwt,
@@ -248,9 +251,10 @@ def test_confirm_post_confirm_persists_token(multi_user_client, signed_jwt):
         "/oauth/confirm",
         content=f"pending_token={pending_token}&action=confirm".encode("utf-8"),
         headers={"Content-Type": "application/x-www-form-urlencoded"},
+        follow_redirects=False,
     )
-    assert post.status_code == 200
-    assert b"Connected" in post.content
+    assert post.status_code == 303
+    assert post.headers["location"].startswith("/oauth/connected")
 
     fresh = db_module._SessionFactory()
     try:

@@ -4,6 +4,22 @@ NO bearer auth here. Trust comes from the HMAC-signed state token +
 single-use nonce + sub fingerprint. Documented in detail in
 docs/GMAIL_MCP_OAUTH.md.
 
+Success rendering (Post/Redirect/Get)
+-------------------------------------
+On a successful single-user link the handler 303-redirects to the
+static /oauth/connected page rather than rendering the result inline.
+The callback URL is single-use (the nonce is consumed atomically), so
+an inline success page at this URL flipped to the "already used or
+expired" failure page on any browser reload or prefetch. Redirecting to
+a static page that consumes nothing makes a reload a pure re-render. A
+second hit on this URL after a successful link (nonce already consumed)
+is treated as reload-after-success and redirected to the same static
+page when a live token already exists for the verified principal;
+otherwise the genuine failure page is returned. This second-hit check
+is display-only: it re-consumes no nonce, re-exchanges no code, and
+persists no token. See docs/GMAIL_MCP_OAUTH.md for the security
+rationale.
+
 Email-mismatch handling
 -----------------------
 If Google's /userinfo returns a different email than the one
@@ -30,7 +46,7 @@ from ..crypto import encrypt
 from ..db import session_scope
 from ..pending_link_store import create_pending_link
 from ..state_store import consume_nonce
-from ..token_store import upsert_token
+from ..token_store import get_token, upsert_token
 from ._helpers import callback_html
 
 logger = logging.getLogger(__name__)
@@ -80,6 +96,32 @@ async def oauth2callback(
     with session_scope() as session:
         consumed = consume_nonce(session, ctx.nonce)
         if consumed is None:
+            # The nonce was already consumed (or expired / never existed).
+            # In single-user mode this is most often a benign reload of a
+            # flow that already succeeded: the success page used to render
+            # inline at this single-use URL, so any reload re-ran the
+            # consume and flipped to the failure page. If a live token
+            # already exists for this verified (auth0_sub, account_email),
+            # treat it as reload-after-success and send the browser to the
+            # stable success page. Display-only: no nonce is re-consumed,
+            # no code is re-exchanged, and no token is re-persisted. A
+            # genuinely expired / never-succeeded link has no live token
+            # and still gets the real failure page below.
+            if not settings.requires_confirm_page:
+                existing = get_token(
+                    session, auth0_sub=ctx.auth0_sub, account_email=ctx.account_email
+                )
+                token_live = (
+                    existing is not None
+                    and existing.revoked_at is None
+                    and existing.encrypted_refresh_token not in (None, b"")
+                )
+                if token_live:
+                    logger.info(
+                        "oauth2callback: benign reload after success "
+                        "(nonce already consumed, token live)"
+                    )
+                    return RedirectResponse(url="/oauth/connected", status_code=303)
             logger.info("oauth2callback: nonce missing or already consumed")
             return callback_html(
                 False, "This connection link has already been used or expired. Please retry."
@@ -240,4 +282,8 @@ async def oauth2callback(
         ctx.auth0_sub,
         persisted_email,
     )
-    return callback_html(True, f"Connected {persisted_email}.")
+    # Post/Redirect/Get: send the browser to the static success page so a
+    # reload re-renders that page instead of re-hitting this single-use
+    # callback URL (which would find the nonce consumed and fail). The
+    # target carries no email / token / state.
+    return RedirectResponse(url="/oauth/connected", status_code=303)

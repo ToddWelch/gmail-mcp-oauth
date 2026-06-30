@@ -9,7 +9,13 @@ GET  /oauth2callback      No bearer. Trust comes from the HMAC-signed
                           state token + single-use nonce + sub
                           fingerprint. Exchanges the code, fetches
                           userinfo, persists the encrypted refresh
-                          token. See callback.py.
+                          token, then 303-redirects to /oauth/connected
+                          (Post/Redirect/Get). See callback.py.
+GET  /oauth/connected     No bearer. Static, reload-safe success page
+                          the callback (and the multi-user confirm POST)
+                          redirect to after a successful link. No query
+                          params, no DB, no per-account data. See
+                          connected.py.
 GET  /oauth/status        Bearer-authenticated. Returns the connection
                           state for the bearer's auth0_sub. Defaults
                           to active rows only; pass
@@ -55,11 +61,12 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from . import callback, confirm, disconnect, start, status
+from . import callback, confirm, connected, disconnect, start, status
 
 router = APIRouter()
 router.include_router(start.router)
 router.include_router(callback.router)
+router.include_router(connected.router)
 router.include_router(confirm.router)
 router.include_router(status.router)
 router.include_router(disconnect.router)
