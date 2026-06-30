@@ -35,6 +35,7 @@ refresh token persisted in `gmail_oauth_tokens`.
    - Application type: Web application.
    - Authorized redirect URIs: add the EXACT value of `GOOGLE_OAUTH_REDIRECT_URL` (e.g. `https://gmail-mcp.example.com/oauth2callback`). Google compares byte-for-byte; trailing slash differences will fail.
 5. Copy the Client ID and Client Secret.
+6. Publish the OAuth app (Testing -> In production). On the OAuth consent screen, open the **Publishing status** panel and click **Publish app** so the status reads "In production". An External app left in "Testing" status issues refresh tokens that Google expires after **7 days**; when that happens the next Gmail tool call hits `400 invalid_grant`, the link is soft-revoked, and the user is forced to relink roughly weekly (see [User revoked at Google](#user-revoked-at-google) for the runtime path). Publishing to production removes the 7-day cap and refresh tokens become **long-lived** (not non-expiring). A long-lived refresh token can still stop working under Google's normal conditions: roughly six months without any use, a Google account password change while Gmail (restricted) scopes are granted, the user explicitly revoking access, or the account exceeding Google's per-user live-refresh-token limit. Any of these surfaces the same `invalid_grant` -> soft-revoke -> relink path above. For a **single-user, personal, or self-hosted** deploy you do NOT need to complete Google's verification review to publish: an unverified published app still issues long-lived refresh tokens; the user just passes a one-time "Google hasn't verified this app" warning (Advanced -> Go to <app>) on first consent. This unverified-published shortcut is appropriate ONLY for single-user / personal / self-hosted use. Distributing the connector to other users is a different posture: Google caps unverified apps (the 100-user limit) and requires verification, including the restricted-scope security assessment for Gmail scopes, before a broad user base can consent.
 
 ### 2. Railway env vars
 
@@ -155,9 +156,11 @@ If the user revokes the app at <https://myaccount.google.com/permissions>, our r
 
 1. Soft-revokes the row (`revoked_at = now`, `updated_at = now`).
 2. Drops the in-memory access-token cache.
-3. Raises `TokenUnavailableError` so the tool dispatcher can surface "user must re-link" instead of a transient retry.
+3. Raises `TokenUnavailableError`, which the tool dispatcher translates into a `needs_reauth` error that names the `connect_gmail_account` tool as the relink remediation, instead of a transient retry.
 
 This is the expected behavior, not a bug. The `/oauth/status` endpoint will then show `has_token: false` and `revoked_at` populated for that account.
+
+If this `invalid_grant` recurs on a roughly weekly cadence rather than from a genuine user revocation, the OAuth app is almost certainly still in "Testing" publishing status (see [Google Cloud Console](#1-google-cloud-console), step 6); publishing to production removes the 7-day refresh-token expiry. To recover an already-soft-revoked link, the user relinks by calling the `connect_gmail_account` tool (or hitting `/oauth/start`); the `needs_reauth` error returned by every Gmail tool carries that remediation in both its message and its `error_data.reconnect_tool` field.
 
 ### Clock skew tolerance
 

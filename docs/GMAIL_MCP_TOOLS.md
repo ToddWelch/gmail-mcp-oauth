@@ -145,6 +145,34 @@ the Railway env to include the appropriate scopes, then prompt users to
 re-link. The connector does not require this to be set; it is purely
 opt-in.
 
+## `needs_reauth` error shape
+
+A tool returns `needs_reauth` (`-32003`) when the mailbox link is gone
+or unusable: no token row for the `(auth0_sub, account_email)` pair, a
+soft-revoked row, or Google rejecting the refresh token with
+`invalid_grant` (for example after the 7-day testing-mode expiry; see
+GMAIL_MCP_OAUTH.md). The response carries a structured `error_data`
+block naming the tool the caller invokes to recover:
+
+```json
+{
+  "code": -32003,
+  "message": "Google account you@example.com is soft-revoked. Call the connect_gmail_account tool to relink this Gmail account, then retry.",
+  "data": {
+    "error_data": {
+      "reconnect_tool": "connect_gmail_account",
+      "reconnect_hint": "Call the connect_gmail_account tool to relink this Gmail account, then retry."
+    }
+  }
+}
+```
+
+`reconnect_tool` is stable so a client can branch on it without parsing
+the human-readable message; the leading sentence of `message` carries
+the specific reason. To recover, call `connect_gmail_account` with the
+same `account_email`, complete the OAuth handshake it returns, then
+retry the original tool.
+
 ## Audit log shape
 
 Every tool dispatch emits exactly one log line at INFO level (or WARN
