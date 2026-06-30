@@ -32,8 +32,9 @@ The form POSTs `pending_token` (hidden input) and `action`
      and drop the row.
   2. On action=confirm: atomically consume the row via
      `consume_pending_link` and upsert into `gmail_oauth_tokens`
-     in the SAME transaction. Returns the standard "Connected"
-     callback HTML on success.
+     in the SAME transaction. On success it 303-redirects to the
+     static /oauth/connected page (Post/Redirect/Get) so a browser
+     reload does not re-POST this form.
   3. On action=cancel: drop the row via `discard_pending_link`.
      Returns a "Cancelled" HTML page; nothing else happens.
   4. On unknown / missing token / expired / replay: returns the
@@ -57,7 +58,7 @@ from typing import Any
 from urllib.parse import parse_qs
 
 from fastapi import APIRouter, Query, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from ..crypto import decrypt
 from ..db import session_scope
@@ -171,7 +172,7 @@ def _parse_form(raw: bytes) -> dict[str, str]:
 
 
 @router.post("/oauth/confirm")
-async def oauth_confirm_post(request: Request) -> HTMLResponse:
+async def oauth_confirm_post(request: Request) -> Response:
     """Consume a pending row according to the user's action.
 
     Form fields parsed manually from the request body to avoid the
@@ -252,4 +253,7 @@ async def oauth_confirm_post(request: Request) -> HTMLResponse:
         auth0_sub,
         persisted_email,
     )
-    return callback_html(True, f"Connected {persisted_email}.")
+    # Post/Redirect/Get: redirect to the static success page so a browser
+    # reload does not re-POST this form (which would find the pending row
+    # already consumed and render the failure page).
+    return RedirectResponse(url="/oauth/connected", status_code=303)

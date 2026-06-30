@@ -176,15 +176,49 @@ def test_oauth2callback_happy_path(client, signed_jwt):
         return_value=httpx.Response(200, json=userinfo_response)
     )
 
-    resp = client.get("/oauth2callback", params={"code": "auth-code-abc", "state": state})
+    # Post/Redirect/Get: success now 303-redirects to the static
+    # /oauth/connected page instead of rendering inline.
+    resp = client.get(
+        "/oauth2callback",
+        params={"code": "auth-code-abc", "state": state},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/oauth/connected"
+
+    # Following the redirect lands on the static, reload-safe success page.
+    page = client.get(resp.headers["location"])
+    assert page.status_code == 200
+    assert "Connected" in page.text
+
+
+# ---- Static success page is reload-safe and account-agnostic ---------------
+
+
+def test_oauth_connected_static_success_page(client):
+    """GET /oauth/connected renders a static success page that echoes no
+    per-account data and re-renders identically on reload."""
+    resp = client.get("/oauth/connected")
     assert resp.status_code == 200
     assert "Connected" in resp.text
+    # No per-account data leaked (no email, no token, no state).
+    assert "@" not in resp.text
+    # Reload re-renders identically.
+    again = client.get("/oauth/connected")
+    assert again.status_code == 200
+    assert again.text == resp.text
 
 
-# ---- Replay: a state token consumed once cannot be consumed again ----------
+# ---- Replay after success: no side effect, friendly page (not failure) -----
 
 
 def test_oauth2callback_state_replay_rejected(client, signed_jwt):
+    """A second hit on the same callback URL after a successful link is a
+    benign reload-after-success. The single-use replay defense is intact:
+    NO second code exchange, NO duplicate token row, and the nonce's
+    consumed_at is unchanged (it is not re-consumed). Only the page shown
+    changes from the alarming failure page to the stable success page.
+    """
     headers = {"Authorization": _bearer(signed_jwt, sub="user-abc")}
     start = client.get(
         "/oauth/start",
@@ -195,7 +229,7 @@ def test_oauth2callback_state_replay_rejected(client, signed_jwt):
 
     state = parse_qs(urlparse(start.json()["authorization_url"]).query)["state"][0]
 
-    client._respx_router.post(TOKEN_URL).mock(
+    token_route = client._respx_router.post(TOKEN_URL).mock(
         return_value=httpx.Response(
             200,
             json={
@@ -214,13 +248,87 @@ def test_oauth2callback_state_replay_rejected(client, signed_jwt):
         )
     )
 
-    first = client.get("/oauth2callback", params={"code": "c", "state": state})
-    assert first.status_code == 200
+    from mcp_gmail.state_store import OAuthStateNonce
+    from mcp_gmail.token_store import GmailOAuthToken
 
-    # Second consume attempt must fail; nonce already consumed.
-    second = client.get("/oauth2callback", params={"code": "c", "state": state})
-    assert second.status_code == 400
-    assert "already been used" in second.text or "expired" in second.text
+    first = client.get(
+        "/oauth2callback",
+        params={"code": "c", "state": state},
+        follow_redirects=False,
+    )
+    assert first.status_code == 303
+    assert first.headers["location"] == "/oauth/connected"
+
+    # Invariants captured after the first (real) hit.
+    fresh = db_module._SessionFactory()
+    try:
+        assert fresh.query(GmailOAuthToken).count() == 1
+        nonce_row = fresh.query(OAuthStateNonce).one()
+        consumed_at_after_first = nonce_row.consumed_at
+        assert consumed_at_after_first is not None
+    finally:
+        fresh.close()
+
+    # Second hit on the SAME URL: benign reload-after-success.
+    second = client.get(
+        "/oauth2callback",
+        params={"code": "c", "state": state},
+        follow_redirects=False,
+    )
+    assert second.status_code == 303
+    assert second.headers["location"] == "/oauth/connected"
+
+    # Replay defense: no second code exchange, no duplicate token row, and
+    # the nonce's consumed_at is unchanged (it was not re-consumed).
+    assert token_route.call_count == 1
+    fresh = db_module._SessionFactory()
+    try:
+        assert fresh.query(GmailOAuthToken).count() == 1
+        nonce_row = fresh.query(OAuthStateNonce).one()
+        assert nonce_row.consumed_at == consumed_at_after_first
+    finally:
+        fresh.close()
+
+
+# ---- Consumed nonce with NO live token still fails hard (Claim 6) -----------
+
+
+def test_oauth2callback_consumed_nonce_no_token_still_fails_hard(client, signed_jwt):
+    """consume-None with NO live token for the verified principal still
+    returns the hard 400 failure page (not the friendly success). Guards
+    against a regression that converts every single-user replay to 303."""
+    headers = {"Authorization": _bearer(signed_jwt, sub="user-abc")}
+    start = client.get(
+        "/oauth/start",
+        params={"account_email": "nolink@example.com"},
+        headers=headers,
+    )
+    from urllib.parse import parse_qs, urlparse
+
+    state = parse_qs(urlparse(start.json()["authorization_url"]).query)["state"][0]
+
+    # Mark the freshly-minted nonce consumed WITHOUT creating any token
+    # row: models a flow that consumed its nonce but never produced a live
+    # link (exchange failure, expired-after-consume, etc.).
+    from datetime import datetime, timezone
+
+    from mcp_gmail.state_store import OAuthStateNonce
+
+    fresh = db_module._SessionFactory()
+    try:
+        nonce_row = fresh.query(OAuthStateNonce).one()
+        nonce_row.consumed_at = datetime.now(timezone.utc)
+        fresh.commit()
+    finally:
+        fresh.close()
+
+    resp = client.get(
+        "/oauth2callback",
+        params={"code": "c", "state": state},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 400
+    assert "already been used" in resp.text or "expired" in resp.text
 
 
 # ---- Tampered state is rejected with the generic error page ----------------
