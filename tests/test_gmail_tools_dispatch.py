@@ -99,6 +99,10 @@ async def test_dispatch_returns_needs_reauth_when_no_token_row():
         settings=settings,
     )
     assert result["code"] == ToolErrorCode.NEEDS_REAUTH
+    # The needs_reauth response advertises the relink tool both in the
+    # structured error_data and in the human-readable message.
+    assert result["data"]["error_data"]["reconnect_tool"] == "connect_gmail_account"
+    assert "connect_gmail_account" in result["message"]
 
 
 @pytest.mark.asyncio
@@ -163,6 +167,12 @@ async def test_dispatch_returns_needs_reauth_on_token_unavailable():
             settings=settings,
         )
     assert result["code"] == ToolErrorCode.NEEDS_REAUTH
+    # TokenUnavailableError is translated at the dispatch surface into a
+    # needs_reauth error that names connect_gmail_account as the fix. The
+    # underlying reason is preserved as the leading sentence.
+    assert result["data"]["error_data"]["reconnect_tool"] == "connect_gmail_account"
+    assert result["message"].startswith("revoked at Google")
+    assert "connect_gmail_account" in result["message"]
 
 
 @pytest.mark.asyncio

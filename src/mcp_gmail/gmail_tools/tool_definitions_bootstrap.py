@@ -41,12 +41,18 @@ TOOL_DEFINITIONS_BOOTSTRAP: list[dict[str, Any]] = [
     {
         "name": "connect_gmail_account",
         "description": (
-            "Begin a Google OAuth handshake to link a Gmail mailbox to "
-            "this MCP connector. Returns an authorization_url that the "
-            "user must open in a browser to grant consent. After Google "
-            "redirects them back, the linked account is available to "
-            "every other Gmail tool. Use this BEFORE calling any other "
-            "Gmail tool when no account has been linked yet."
+            "Start a Google OAuth handshake to link, relink, or reconnect "
+            "a Gmail mailbox for this MCP connector. It returns an "
+            "authorization_url that the user opens in a browser to grant "
+            "consent; after Google redirects back, the mailbox is available "
+            "to every other Gmail tool. Use it for first-time setup, and "
+            "also to reauthorize a mailbox whose connection has stopped "
+            "working because it was disconnected, revoked, or expired. When "
+            "another Gmail tool reports that the account needs to be "
+            "re-authorized, call this tool to reconnect and then retry the "
+            "original request. This is the remediation for a soft-revoked "
+            "link or a needs_reauth / invalid_grant error, not only for "
+            "first-time linking."
         ),
         "inputSchema": {
             "type": "object",

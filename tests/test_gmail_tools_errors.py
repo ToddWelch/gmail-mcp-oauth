@@ -9,7 +9,9 @@ with broader scopes.
 from __future__ import annotations
 
 from mcp_gmail.gmail_tools.errors import (
+    NEEDS_REAUTH_RECONNECT_HINT,
     RECONNECT_HINT_DEFAULT,
+    RECONNECT_TOOL_NAME,
     ToolErrorCode,
     bad_request_error,
     needs_reauth_error,
@@ -119,7 +121,56 @@ def test_scope_insufficient_includes_sufficient_alternatives_when_provided():
 def test_needs_reauth_error_uses_correct_code():
     err = needs_reauth_error("token revoked")
     assert err["code"] == ToolErrorCode.NEEDS_REAUTH
-    assert err["message"] == "token revoked"
+    # The reason is preserved as the leading sentence; the builder appends
+    # the relink remediation rather than returning the bare reason.
+    assert err["message"].startswith("token revoked")
+
+
+def test_needs_reauth_reconnect_tool_constant_is_connect_gmail_account():
+    assert RECONNECT_TOOL_NAME == "connect_gmail_account"
+
+
+def test_needs_reauth_includes_structured_reconnect_hint():
+    """needs_reauth mirrors scope_insufficient: structured error_data with
+    a stable reconnect_tool a client can branch on, plus a reconnect_hint.
+    """
+    err = needs_reauth_error("token revoked")
+    error_data = err["data"]["error_data"]
+    assert error_data["reconnect_tool"] == "connect_gmail_account"
+    assert error_data["reconnect_hint"] == NEEDS_REAUTH_RECONNECT_HINT
+
+
+def test_needs_reauth_message_names_connect_gmail_account():
+    """The human-readable message names the tool so a client that only
+    surfaces message text still tells the user how to recover.
+    """
+    err = needs_reauth_error("Google account x@example.com is soft-revoked")
+    assert "connect_gmail_account" in err["message"]
+    assert err["message"].endswith(NEEDS_REAUTH_RECONNECT_HINT)
+
+
+def test_needs_reauth_normalizes_trailing_period_on_reason():
+    """A reason that already ends in a period does not produce a double
+    period when the hint is appended.
+    """
+    err = needs_reauth_error("token gone.")
+    assert err["message"].startswith("token gone. ")
+    assert ".. " not in err["message"]
+
+
+def test_needs_reauth_empty_reason_degrades_to_hint_only():
+    err = needs_reauth_error("")
+    assert err["message"] == NEEDS_REAUTH_RECONNECT_HINT
+
+
+def test_needs_reauth_custom_reconnect_tool_and_hint():
+    err = needs_reauth_error(
+        "token revoked",
+        reconnect_tool="other_tool",
+        reconnect_hint="do the thing",
+    )
+    assert err["data"]["error_data"]["reconnect_tool"] == "other_tool"
+    assert err["message"].endswith("do the thing")
 
 
 def test_not_found_error():

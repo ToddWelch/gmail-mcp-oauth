@@ -85,6 +85,19 @@ class ToolErrorCode:
 RECONNECT_HINT_DEFAULT = "Re-link the account at /oauth/start to grant additional scopes"
 
 
+# Tool a caller invokes to relink a soft-revoked / invalid_grant account.
+# Kept as a module constant so the needs_reauth contract and its tests
+# reference one source of truth.
+RECONNECT_TOOL_NAME = "connect_gmail_account"
+
+# Human-readable remediation appended to needs_reauth messages and
+# mirrored into error_data.reconnect_hint. Names the tool so a capability
+# search for "relink" / "reconnect" lands on connect_gmail_account.
+NEEDS_REAUTH_RECONNECT_HINT = (
+    f"Call the {RECONNECT_TOOL_NAME} tool to relink this Gmail account, then retry."
+)
+
+
 # ---------------------------------------------------------------------------
 # Error helper
 # ---------------------------------------------------------------------------
@@ -163,9 +176,36 @@ def scope_insufficient_error(
     )
 
 
-def needs_reauth_error(message: str) -> dict[str, Any]:
-    """Return a needs_reauth error. Caller surface for token-row gone/revoked."""
-    return tool_error(ToolErrorCode.NEEDS_REAUTH, message)
+def needs_reauth_error(
+    message: str,
+    *,
+    reconnect_tool: str = RECONNECT_TOOL_NAME,
+    reconnect_hint: str = NEEDS_REAUTH_RECONNECT_HINT,
+) -> dict[str, Any]:
+    """Return a needs_reauth error that names the relink tool.
+
+    Mirrors `scope_insufficient_error`: every needs_reauth response
+    carries a structured `error_data` block so a caller can branch on
+    `reconnect_tool` without parsing the human-readable message, and the
+    `reconnect_hint` is appended to the message so a client that surfaces
+    only message text still sees the remediation.
+
+    `message` is the reason the token is unusable (row missing,
+    soft-revoked, or Google invalid_grant). It is joined with the hint
+    using a single space; any trailing period or whitespace on the reason
+    is normalized first so the combined text reads as one sentence pair.
+    An empty reason degrades to the hint alone.
+    """
+    reason = message.rstrip(". ")
+    full_message = f"{reason}. {reconnect_hint}" if reason else reconnect_hint
+    return tool_error(
+        ToolErrorCode.NEEDS_REAUTH,
+        full_message,
+        error_data={
+            "reconnect_tool": reconnect_tool,
+            "reconnect_hint": reconnect_hint,
+        },
+    )
 
 
 def not_found_error(message: str) -> dict[str, Any]:

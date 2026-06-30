@@ -114,7 +114,8 @@ async def dispatch_tool_call(
     if not sub:
         # Defense in depth. The auth layer already rejected unsigned
         # tokens, but a future test path that bypasses auth shouldn't
-        # produce a bad audit log line.
+        # produce a bad audit log line. (The appended relink hint is
+        # loose on this unreachable branch; uniform contract wins.)
         return needs_reauth_error("no auth0_sub in claims")
 
     # bootstrap-tool short-circuit. The bootstrap path
@@ -181,9 +182,7 @@ async def dispatch_tool_call(
                 outcome="needs_reauth",
                 error_code=-32003,
             )
-            return needs_reauth_error(
-                f"no Google account linked for {ctx.account_email}; user must run /oauth/start"
-            )
+            return needs_reauth_error(f"no Google account linked for {ctx.account_email}")
         if row.revoked_at is not None:
             audit(
                 tool=tool_name,
@@ -192,9 +191,7 @@ async def dispatch_tool_call(
                 outcome="needs_reauth",
                 error_code=-32003,
             )
-            return needs_reauth_error(
-                f"Google account {ctx.account_email} is soft-revoked; user must re-link"
-            )
+            return needs_reauth_error(f"Google account {ctx.account_email} is soft-revoked")
         granted_scope = row.scope or ""
     # END SESSION BOUNDARY #1.
 

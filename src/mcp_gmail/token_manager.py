@@ -156,9 +156,7 @@ async def get_access_token(
             if row is None:
                 raise TokenUnavailableError(f"no Google account linked for {auth0_sub}/{email}")
             if row.revoked_at is not None:
-                raise TokenUnavailableError(
-                    f"Google account {email} is soft-revoked; user must re-link"
-                )
+                raise TokenUnavailableError(f"Google account {email} is soft-revoked")
             refresh_token_plaintext = get_decrypted_refresh_token(
                 row, encryption_key, *prior_encryption_keys
             )
@@ -192,7 +190,7 @@ async def get_access_token(
                         wipe_token_ciphertext(session, row)
                 _drop_cache(key)
                 raise TokenUnavailableError(
-                    "Google rejected refresh token (invalid_grant); user must re-link"
+                    "Google rejected refresh token (invalid_grant)"
                 ) from exc
             raise
 

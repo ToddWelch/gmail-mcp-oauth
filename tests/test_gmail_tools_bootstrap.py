@@ -68,6 +68,17 @@ def test_connect_gmail_account_in_tool_definitions():
     assert "connect_gmail_account" in names
 
 
+def test_connect_gmail_account_description_advertises_relink_vocabulary():
+    """The description must carry the capability terms a host's tool search
+    matches on when a link is soft-revoked, so the relink tool is
+    discoverable from a needs_reauth condition (not only first-time setup).
+    """
+    entry = next(t for t in TOOL_DEFINITIONS if t["name"] == "connect_gmail_account")
+    desc = entry["description"].lower()
+    for term in ("relink", "reconnect", "reauthorize", "soft-revoked", "needs_reauth"):
+        assert term in desc, f"description missing capability term: {term}"
+
+
 def test_total_tool_count_is_thirty_two():
     """The fanout helpers bump the tool surface to 32 (30 + 2)."""
     assert len(TOOL_DEFINITIONS) == 32
