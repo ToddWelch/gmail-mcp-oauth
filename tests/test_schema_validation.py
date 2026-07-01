@@ -125,12 +125,40 @@ def test_reject_max_length_violation():
         pytest.param("id\\bad", id="backslash"),
         pytest.param("idаbc", id="unicode-cyrillic-homoglyph"),
         pytest.param("a" * 257, id="oversize-257-chars"),
+        pytest.param("M1\n", id="trailing-lf"),
+        pytest.param("M1\r", id="trailing-cr"),
     ],
 )
 def test_adversarial_message_id_rejected_at_schema_layer(bad_id):
-    """Each adversarial shape rejected at schema BEFORE handlers run."""
+    """Each adversarial shape rejected at schema BEFORE handlers run.
+
+    The trailing-lf / trailing-cr cases specifically exercise the
+    `_schema_validator` full-string-match hardening: Python jsonschema
+    enforces `pattern` with `re.search`, whose `$` matches before a final
+    newline, so without fullmatch these would slip through the boundary.
+    """
     field = validate_arguments("read_email", {"account_email": EMAIL, "message_id": bad_id})
     assert field is not None and "message_id" in field
+
+
+def test_trailing_newline_attachment_id_rejected_at_schema_layer():
+    """A valid-length attachment_id with a trailing CR/LF is rejected at
+    the dispatch boundary (full-string pattern enforcement), while the
+    clean id passes."""
+    good = "A" * 20
+    assert (
+        validate_arguments(
+            "download_attachment",
+            {"account_email": EMAIL, "message_id": GMAIL_ID, "attachment_id": good},
+        )
+        is None
+    )
+    for suffix in ("\n", "\r", "\r\n"):
+        field = validate_arguments(
+            "download_attachment",
+            {"account_email": EMAIL, "message_id": GMAIL_ID, "attachment_id": good + suffix},
+        )
+        assert field is not None and "attachment_id" in field
 
 
 def test_adversarial_metadata_header_blocks_crlf():

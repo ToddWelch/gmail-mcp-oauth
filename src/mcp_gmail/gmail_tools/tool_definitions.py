@@ -9,8 +9,11 @@ rule. gmail_tools/__init__.py concatenates this read manifest with
 the write, bootstrap, and extras manifests for the 32-tool surface.
 
 Every Gmail-ID-shaped field carries a `pattern` matching
-gmail_id._VALIDATION_PATTERN. download_attachment.attachment_id
-keeps the stricter {16,128} pattern by design.
+gmail_id._VALIDATION_PATTERN ({1,256}). download_attachment.attachment_id
+is the one exception: it uses the wider {16,2048} attachment pattern
+(gmail_id._ATTACHMENT_VALIDATION_PATTERN) because real Gmail attachment
+IDs routinely exceed 256 chars, and it is optional because the tool also
+selects an attachment by filename or part_index.
 """
 
 from __future__ import annotations
@@ -98,9 +101,21 @@ _SEARCH_EMAILS_DEF: dict[str, Any] = {
 _DOWNLOAD_ATTACHMENT_DEF: dict[str, Any] = {
     "name": "download_attachment",
     "description": (
-        "Return one attachment payload (base64url-encoded) by "
-        "message ID + attachment ID. The attachment ID comes from "
-        "read_email's payload.parts[*].body.attachmentId."
+        "Return one attachment from a message, enriched as "
+        "{filename, mime_type, size, data} where `data` is "
+        "base64url-encoded bytes and `size` is the byte size. Select "
+        "the attachment with EXACTLY ONE of three modes: (1) "
+        "`attachment_id` (Gmail's opaque reference from read_email's "
+        "payload.parts[*].body.attachmentId); (2) `filename` (exact, "
+        "case-sensitive; if two attachments share the name it is "
+        "rejected, disambiguate with part_index); (3) `part_index` "
+        "(0-based document order over every part that has a server-side "
+        "attachmentId; a part's filename may be absent for inline "
+        "attachments, so filename is null for those; parts with no "
+        "attachmentId are not downloadable and are not counted). "
+        "Supplying zero or more than one selector is rejected. Prefer "
+        "filename or part_index so you never have to handle the long "
+        "attachment_id yourself."
     ),
     "inputSchema": {
         "type": "object",
@@ -115,14 +130,36 @@ _DOWNLOAD_ATTACHMENT_DEF: dict[str, Any] = {
             "attachment_id": {
                 "type": "string",
                 "description": (
-                    "Gmail attachment identifier. Validated against "
-                    "the documented Gmail ID alphabet (alphanumeric "
-                    "plus underscore/hyphen, 16 to 128 chars)."
+                    "Gmail attachment identifier. Optional; one of the "
+                    "three selection modes. Validated against the Gmail "
+                    "ID alphabet (alphanumeric plus underscore/hyphen, "
+                    "16 to 2048 chars; real IDs routinely exceed 256)."
                 ),
-                "pattern": "^[A-Za-z0-9_\\-]{16,128}$",
+                "pattern": "^[A-Za-z0-9_\\-]{16,2048}$",
+            },
+            "filename": {
+                "type": "string",
+                "description": (
+                    "Select the attachment by exact, case-sensitive "
+                    "filename. Optional; one of the three selection "
+                    "modes."
+                ),
+                "minLength": 1,
+                "maxLength": 256,
+            },
+            "part_index": {
+                "type": "integer",
+                "description": (
+                    "Select the attachment by 0-based index into the "
+                    "message's downloadable parts in document order "
+                    "(every part that has a server-side attachmentId, "
+                    "including nameless inline attachments). Optional; "
+                    "one of the three selection modes."
+                ),
+                "minimum": 0,
             },
         },
-        "required": ["account_email", "message_id", "attachment_id"],
+        "required": ["account_email", "message_id"],
         "additionalProperties": False,
     },
 }

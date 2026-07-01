@@ -13,7 +13,7 @@ and is updated alongside every PR that changes a tool surface.
 |------|---------------|------------|-------|
 | `read_email` | `gmail.readonly` | read | Format defaults to `full`. |
 | `search_emails` | `gmail.readonly` | read | Gmail web-search syntax. Returns ID stubs only; follow up with read_email per ID. |
-| `download_attachment` | `gmail.readonly` | read | `attachment_id` validated against Gmail ID pattern before HTTP. |
+| `download_attachment` | `gmail.readonly` | read | Select the attachment by EXACTLY ONE of `attachment_id`, `filename` (exact, case-sensitive match over parts that have that filename; ambiguous -> bad_request listing part_index candidates), or `part_index` (0-based document order over every part with a server-side attachmentId, including nameless inline attachments; a part's `filename` may be null). Parts with no attachmentId (small inline body.data) are not downloadable and are not enumerated. Returns enriched `{filename, mime_type, size, data}` (`data` base64url). `attachment_id` uses the wider `{16,2048}` pattern (real IDs exceed 256) and is validated (fullmatch, trailing CR/LF rejected) before HTTP; message fetch enriches metadata (best-effort on the attachment_id path, load-bearing on the filename/part_index paths). |
 | `download_email` | `gmail.readonly` | read | Returns RFC 5322 raw bytes base64url-encoded. |
 | `get_thread` | `gmail.readonly` | read | Returns all messages in the thread. |
 | `list_inbox_threads` | `gmail.readonly` | read | Stubs only; expand via get_thread. |

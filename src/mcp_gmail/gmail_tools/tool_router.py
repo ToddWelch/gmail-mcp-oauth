@@ -102,7 +102,9 @@ async def route_tool(
             return await messages.download_attachment(
                 client=client,
                 message_id=require_str(arguments, "message_id"),
-                attachment_id=require_str(arguments, "attachment_id"),
+                attachment_id=optional_str(arguments, "attachment_id"),
+                filename=optional_str(arguments, "filename"),
+                part_index=optional_int(arguments, "part_index"),
             )
 
         if tool_name == "download_email":

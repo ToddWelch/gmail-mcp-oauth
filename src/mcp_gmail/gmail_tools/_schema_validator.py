@@ -35,9 +35,12 @@ Design notes
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from jsonschema import Draft202012Validator
+from jsonschema.exceptions import ValidationError
+from jsonschema.validators import extend
 
 from . import TOOL_DEFINITIONS
 
@@ -47,12 +50,35 @@ logger = logging.getLogger(__name__)
 _FIELD_PATH_MAX = 200
 
 
+def _pattern_fullmatch(validator, patrn, instance, schema):
+    """`pattern` keyword override that enforces a FULL-string match.
+
+    JSON Schema's `pattern` is a search in Python's `jsonschema`
+    (`re.search`), and Python's `$` matches just before a trailing
+    newline. That let a value like `"ABCD...\\n"` satisfy an anchored
+    `^...$` ID pattern at the dispatch boundary even though a trailing
+    CR/LF is whitespace outside every ID alphabet. Enforcing
+    `re.fullmatch` closes that seam consistently with the runtime
+    validators in gmail_id.py. Every ID `pattern` in the manifest is
+    already fully anchored (`^...$`), so requiring a full match changes
+    no legitimate behavior; it only rejects the trailing-newline bypass.
+    """
+    if validator.is_type(instance, "string") and re.fullmatch(patrn, instance) is None:
+        yield ValidationError(f"{instance!r} does not fully match pattern {patrn!r}")
+
+
+# Draft 2020-12 validator with the hardened `pattern` check spliced in.
+_StrictValidator = extend(Draft202012Validator, {"pattern": _pattern_fullmatch})
+
+
 def _build_validators() -> dict[str, Draft202012Validator]:
     """Compile one validator per tool, keyed by tool name.
 
-    Runs `Draft202012Validator.check_schema(inputSchema)` per tool so
-    a malformed manifest entry raises a `SchemaError` at import time
-    (CI catches it before the build ever ships).
+    Runs `check_schema(inputSchema)` per tool so a malformed manifest
+    entry raises a `SchemaError` at import time (CI catches it before
+    the build ever ships). Uses `_StrictValidator` (a Draft202012Validator
+    subclass) so the `pattern` keyword is full-string enforced
+    (trailing-newline hardening).
     """
     cache: dict[str, Draft202012Validator] = {}
     for tool in TOOL_DEFINITIONS:
@@ -60,8 +86,8 @@ def _build_validators() -> dict[str, Draft202012Validator]:
         schema = tool["inputSchema"]
         # Fail fast on malformed schemas at module load. The
         # SchemaError surfaces in CI rather than as a runtime 500.
-        Draft202012Validator.check_schema(schema)
-        cache[name] = Draft202012Validator(schema)
+        _StrictValidator.check_schema(schema)
+        cache[name] = _StrictValidator(schema)
     return cache
 
 

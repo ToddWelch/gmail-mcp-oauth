@@ -8,9 +8,9 @@ parameter-injection seam if a caller (or a compromised tool argument)
 ever feeds in a value containing slashes, query separators, or other
 URL-meaningful characters.
 
-Two patterns, one job
----------------------
-We deliberately use two patterns:
+Three patterns, distinct jobs
+-----------------------------
+We deliberately use three patterns:
 
 1. `_VALIDATION_PATTERN`  (range 1..256)
    Hard validation. Applied at every Gmail-ID interpolation site
@@ -42,7 +42,21 @@ We deliberately use two patterns:
    value has already been validated against the looser pattern),
    it is a quiet caller-bug signal in audit history.
 
-The two patterns must stay separate. Conflating them either:
+3. `_ATTACHMENT_VALIDATION_PATTERN`  (range 16..2048)
+   Hard validation for the attachment_id field only. Gmail
+   attachment IDs are base64url blobs that routinely exceed the
+   256-char cap used for message/thread/label IDs (observed 300+
+   chars), so the attachment_id interpolation site
+   (`GmailClient.get_attachment`) validates against this wider
+   pattern via `validate_attachment_id`. The alphabet is identical
+   to `_VALIDATION_PATTERN` (URL-safe, no slashes / query
+   separators / whitespace / unicode); only the upper length bound
+   differs (2048 vs 256), which keeps the DoS bound tight while
+   admitting real attachment IDs. Every OTHER Gmail ID stays capped
+   at 256 by `_VALIDATION_PATTERN`.
+
+`_VALIDATION_PATTERN` and `_AUDIT_HEURISTIC_PATTERN` must stay
+separate. Conflating them either:
   - rejects legitimate system-label IDs in path validation (the
     bug review caught), or
   - silences the audit-history caller-bug signal (regressing
@@ -50,11 +64,14 @@ The two patterns must stay separate. Conflating them either:
 
 Centralization
 --------------
-Before the audit-log refactor, `_GMAIL_ID_PATTERN` was duplicated in audit_log.py
-(L70) and `_ATTACHMENT_ID_PATTERN` was duplicated in messages.py
-(L43). we removed those duplicates and routes both through this
-module. audit_log.py re-imports `id_looks_valid_audit_heuristic`
-verbatim; messages.py re-imports `validate_gmail_id`.
+Before the audit-log refactor, `_GMAIL_ID_PATTERN` was duplicated in
+audit_log.py and the attachment-ID pattern was duplicated in the
+download tool. Both now live here and are referenced, not
+re-duplicated: audit_log.py re-imports `id_looks_valid_audit_heuristic`
+verbatim; gmail_client.get_attachment calls `validate_attachment_id`;
+and the download_attachment handler (attachment_download.py) references
+the canonical `_ATTACHMENT_VALIDATION_PATTERN` for its no-round-trip
+early reject rather than compiling its own copy.
 
 Error shape
 -----------
@@ -88,6 +105,15 @@ _VALIDATION_PATTERN = re.compile(r"^[A-Za-z0-9_\-]{1,256}$")
 _AUDIT_HEURISTIC_PATTERN = re.compile(r"^[A-Za-z0-9_\-]{16,128}$")
 
 
+# Hard validation pattern for the attachment_id field ONLY. Gmail
+# attachment IDs are base64url blobs routinely exceeding 256 chars
+# (observed 300+); the general _VALIDATION_PATTERN's 256 cap is too
+# tight for them. Alphabet is identical (URL-safe, no slashes / query
+# separators / whitespace / unicode); only the upper length bound
+# differs. 2048 keeps the DoS bound tight while admitting real IDs.
+_ATTACHMENT_VALIDATION_PATTERN = re.compile(r"^[A-Za-z0-9_\-]{16,2048}$")
+
+
 def validate_gmail_id(value: object, *, field: str) -> str:
     """Hard-validate a Gmail-shaped identifier. Raises ValueError on miss.
 
@@ -103,13 +129,38 @@ def validate_gmail_id(value: object, *, field: str) -> str:
     """
     if not isinstance(value, str):
         raise ValueError(f"{field} must be a string, got {type(value).__name__}")
-    if not _VALIDATION_PATTERN.match(value):
+    # fullmatch (not match): Python's `$` matches just before a trailing
+    # newline, so `match()` would accept "AAAA...\n". A trailing CR/LF is
+    # whitespace outside the URL-safe alphabet and must be rejected before
+    # the value is interpolated into a Gmail URL path.
+    if not _VALIDATION_PATTERN.fullmatch(value):
         # The value is included in the message because callers see the
         # ValueError translated to a bad_request_error dict; the user
         # needs to see what they sent. The dispatcher's audit logger
         # never propagates the bad value into the audit line (the audit
         # outcome is "error" and the error_code is BAD_REQUEST).
         raise ValueError(f"{field} does not match Gmail ID pattern: {value!r}")
+    return value
+
+
+def validate_attachment_id(value: object, *, field: str = "attachment_id") -> str:
+    """Hard-validate a Gmail attachment identifier (wider 16..2048 bound).
+
+    Same ValueError contract as `validate_gmail_id` (raises so the
+    dispatcher's ValueError-to-bad_request_error wrapper handles it in
+    one place), but matches `_ATTACHMENT_VALIDATION_PATTERN` rather than
+    `_VALIDATION_PATTERN`. Used at the attachment_id interpolation site
+    (`GmailClient.get_attachment`). Real Gmail attachment IDs routinely
+    exceed the 256-char cap used for message/thread/label IDs (observed
+    300+ chars); this field gets its own wider pattern while every other
+    Gmail ID stays capped at 256 by `_VALIDATION_PATTERN`.
+    """
+    if not isinstance(value, str):
+        raise ValueError(f"{field} must be a string, got {type(value).__name__}")
+    # fullmatch (not match): reject a trailing CR/LF that Python's `$`
+    # would otherwise allow (see validate_gmail_id).
+    if not _ATTACHMENT_VALIDATION_PATTERN.fullmatch(value):
+        raise ValueError(f"{field} does not match Gmail attachment ID pattern: {value!r}")
     return value
 
 
@@ -130,4 +181,6 @@ def id_looks_valid_audit_heuristic(value: str | None) -> bool:
         return True
     if not isinstance(value, str):
         return False
-    return bool(_AUDIT_HEURISTIC_PATTERN.match(value))
+    # fullmatch for consistency with the hard validators: a trailing
+    # CR/LF fails the heuristic and is promoted to WARN.
+    return bool(_AUDIT_HEURISTIC_PATTERN.fullmatch(value))
