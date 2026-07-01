@@ -54,7 +54,7 @@ from typing import Any
 import httpx
 
 from .gmail_client_write import _GmailWriteMixin
-from .gmail_id import validate_gmail_id
+from .gmail_id import validate_attachment_id, validate_gmail_id
 
 
 GMAIL_API_BASE = "https://gmail.googleapis.com/gmail/v1"
@@ -241,13 +241,15 @@ class GmailClient(_GmailWriteMixin):
         message_id: str,
         attachment_id: str,
     ) -> dict[str, Any]:
-        # validate both IDs before path interpolation. The
-        # tool layer (messages.download_attachment) ALSO validates the
-        # attachment_id with the existing Gmail-ID check; double
-        # validation is cheap and the second guard sits at the
-        # upstream boundary.
+        # validate both IDs before path interpolation. attachment_id
+        # uses the wider 16..2048 attachment pattern (Gmail attachment
+        # IDs routinely exceed 256 chars); message_id keeps the general
+        # 1..256 pattern. The tool layer (messages.download_attachment)
+        # ALSO validates attachment_id with the same wider check; double
+        # validation is cheap and the second guard sits at the upstream
+        # boundary.
         message_id = validate_gmail_id(message_id, field="message_id")
-        attachment_id = validate_gmail_id(attachment_id, field="attachment_id")
+        attachment_id = validate_attachment_id(attachment_id, field="attachment_id")
         return await self._get(f"/users/me/messages/{message_id}/attachments/{attachment_id}")
 
     # ---- read: threads ------------------------------------------------------

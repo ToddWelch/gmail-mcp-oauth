@@ -109,11 +109,14 @@ async def test_get_filter_happy(client):
 
 @pytest.mark.asyncio
 async def test_get_attachment_happy(client):
+    # attachment_id must satisfy the wider {16,2048} attachment pattern
+    # (validate_attachment_id); the old 2-char "A1" would now be rejected.
+    att_id = "ATTACH_000000001"
     with respx.mock(base_url=GMAIL_API_BASE) as router:
-        router.get("/users/me/messages/M1/attachments/A1").mock(
+        router.get(f"/users/me/messages/M1/attachments/{att_id}").mock(
             return_value=httpx.Response(200, json={"size": 99, "data": "abc"})
         )
-        r = await client.get_attachment(message_id="M1", attachment_id="A1")
+        r = await client.get_attachment(message_id="M1", attachment_id=att_id)
         assert r == {"size": 99, "data": "abc"}
 
 

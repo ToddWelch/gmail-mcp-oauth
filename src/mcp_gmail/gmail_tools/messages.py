@@ -16,7 +16,13 @@ mirror the relevant Gmail API response shape with two adjustments:
    safe.
 2. Attachment data (download_attachment, download_email) is returned
    as base64url since that is what Gmail returns to us. The caller
-   decodes if they need binary bytes.
+   decodes if they need binary bytes. download_attachment wraps the
+   raw Gmail attachment payload in an enriched object
+   ({filename, mime_type, size, data}) and lives in
+   attachment_download.py (split out under the 300-LOC /
+   distinct-responsibility rule); see
+   attachment_download.download_attachment for the formal output
+   contract and the three selection modes.
 
 Audit log
 ---------
@@ -29,17 +35,22 @@ audit happens at the dispatch boundary.
 
 from __future__ import annotations
 
-import re
 from typing import Any
 
+from .attachment_download import download_attachment
 from .errors import bad_request_error, not_found_error
 from .gmail_client import GmailApiError, GmailClient
 
-
-# Gmail attachment IDs are base64url-shaped strings. Length range
-# observed: 16 to 128 chars. We validate before calling Gmail so a
-# malformed ID surfaces as bad_request without an upstream round trip.
-_ATTACHMENT_ID_PATTERN = re.compile(r"^[A-Za-z0-9_\-]{16,128}$")
+# download_attachment lives in attachment_download.py (split out under
+# the 300-LOC / distinct-responsibility rule). Re-exported here so the
+# router's `messages.download_attachment` reference and existing test
+# imports keep resolving unchanged.
+__all__ = [
+    "read_email",
+    "search_emails",
+    "download_attachment",
+    "download_email",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -96,43 +107,6 @@ async def search_emails(
         page_token=page_token,
         max_results=max_results,
     )
-
-
-# ---------------------------------------------------------------------------
-# Tool: download_attachment
-# ---------------------------------------------------------------------------
-
-
-async def download_attachment(
-    *,
-    client: GmailClient,
-    message_id: str,
-    attachment_id: str,
-) -> dict[str, Any]:
-    """Return one attachment payload by message + attachment ID.
-
-    Returns Gmail's response verbatim: a dict with `size` and `data`
-    (base64url-encoded). The caller decodes if they need bytes.
-
-    Malformed attachment_id: we validate against the Gmail ID
-    pattern before any HTTP call. Reject early so the audit log shows
-    `<invalid>` for the attachment_id rather than a 404 noise round trip.
-    """
-    if not _ATTACHMENT_ID_PATTERN.match(attachment_id):
-        return bad_request_error(
-            f"attachment_id does not match Gmail ID pattern: {attachment_id!r}"
-        )
-    try:
-        return await client.get_attachment(
-            message_id=message_id,
-            attachment_id=attachment_id,
-        )
-    except GmailApiError as exc:
-        if exc.status == 404:
-            return not_found_error(
-                f"attachment not found: message={message_id} attachment={attachment_id}"
-            )
-        raise
 
 
 # ---------------------------------------------------------------------------

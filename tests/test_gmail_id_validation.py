@@ -9,9 +9,13 @@ Targets:
 - mcp-gmail/src/mcp_gmail/gmail_tools/gmail_client_write.py (9 path-
   interpolation sites + 3 JSON-body ID sites)
 
-Two patterns are intentionally separate (see gmail_id.py docstring):
-- Hard validation: 1..256 char URL-safe alphabet.
+Three patterns are intentionally separate (see gmail_id.py docstring):
+- Hard validation: 1..256 char URL-safe alphabet (_VALIDATION_PATTERN,
+  validate_gmail_id).
 - Audit heuristic: 16..128 char URL-safe alphabet.
+- Attachment hard validation: 16..2048 char URL-safe alphabet
+  (_ATTACHMENT_VALIDATION_PATTERN, validate_attachment_id) for the
+  attachment_id field only, whose real IDs routinely exceed 256 chars.
 
 The system labels (INBOX, TRASH, UNREAD, STARRED, IMPORTANT, SENT,
 DRAFT, SPAM, CATEGORY_*) are 4-12 chars and pass the validation
@@ -35,6 +39,7 @@ from mcp_gmail.gmail_tools.audit_log import audit
 from mcp_gmail.gmail_tools.gmail_client import GMAIL_API_BASE, GmailClient
 from mcp_gmail.gmail_tools.gmail_id import (
     id_looks_valid_audit_heuristic,
+    validate_attachment_id,
     validate_gmail_id,
 )
 
@@ -114,9 +119,49 @@ def test_validate_gmail_id_rejects_empty_string():
 
 
 def test_validate_gmail_id_rejects_overlong_string():
-    """A 257-char string fails (upper bound is 256)."""
+    """A 257-char string fails (upper bound is 256). The shared
+    validation pattern is unchanged by the attachment_id widening."""
     with pytest.raises(ValueError):
         validate_gmail_id("a" * 257, field="thread_id")
+
+
+# ---------------------------------------------------------------------------
+# validate_attachment_id: wider 16..2048 hard-validation pattern for the
+# attachment_id field only. This is gate 3 (the one inside
+# GmailClient.get_attachment) for the long-attachment-ID fix.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("length", [16, 128, 256, 320, 2048])
+def test_validate_attachment_id_accepts_long_ids(length):
+    """Real Gmail attachment IDs routinely exceed the 256-char cap used
+    for other IDs; validate_attachment_id accepts 16..2048 chars."""
+    value = "a" * length
+    assert validate_attachment_id(value, field="attachment_id") == value
+
+
+@pytest.mark.parametrize("length", [15, 2049])
+def test_validate_attachment_id_rejects_out_of_band_lengths(length):
+    """Too short (<16) and beyond the 2048 DoS bound both fail."""
+    with pytest.raises(ValueError):
+        validate_attachment_id("a" * length, field="attachment_id")
+
+
+@pytest.mark.parametrize(
+    "bad_value",
+    ["att\r\nX-Injected: 1", "att/../etc", "att with spaces", "att%2Fbad"],
+)
+def test_validate_attachment_id_rejects_adversarial_shapes(bad_value):
+    """Alphabet is identical to the general validator: the wider length
+    bound does NOT relax the URL-safe-alphabet / injection guard."""
+    with pytest.raises(ValueError) as excinfo:
+        validate_attachment_id(bad_value, field="attachment_id")
+    assert "attachment_id" in str(excinfo.value)
+
+
+def test_validate_attachment_id_rejects_non_string():
+    with pytest.raises(ValueError):
+        validate_attachment_id(12345, field="attachment_id")
 
 
 def test_validate_gmail_id_rejects_non_string():

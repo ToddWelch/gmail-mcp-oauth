@@ -24,8 +24,10 @@ Tests in this file:
 3. A regex-parity sweep that walks every known Gmail-ID-shaped
    field and asserts each declared `pattern` matches
    _EXPECTED_PATTERNS. The only documented exception is
-   download_attachment.attachment_id, which keeps the stricter
-   {16,128} pattern.
+   download_attachment.attachment_id, which uses the wider
+   {16,2048} attachment pattern (real Gmail attachment IDs
+   routinely exceed 256 chars). The five shared ID fields still
+   track gmail_id._VALIDATION_PATTERN ({1,256}), unchanged.
 """
 
 from __future__ import annotations
@@ -95,8 +97,9 @@ def test_tool_schema_message_id_pattern_rejects_adversarial_at_schema_layer():
 
 # regex-parity sweep across every Gmail-ID-shaped field.
 # attachment_id is the only documented exception: real Gmail
-# attachment IDs sit in {16,128}, and aligning the heuristic and
-# declared pattern is deliberate.
+# attachment IDs routinely exceed 256 chars, so its schema uses the
+# wider {16,2048} attachment pattern while every other ID field still
+# tracks the shared {1,256} _VALIDATION_PATTERN.
 
 
 _EXPECTED_PATTERNS: dict[str, str] = {
@@ -105,7 +108,7 @@ _EXPECTED_PATTERNS: dict[str, str] = {
     "label_id": _VALIDATION_PATTERN.pattern,
     "filter_id": _VALIDATION_PATTERN.pattern,
     "draft_id": _VALIDATION_PATTERN.pattern,
-    "attachment_id": r"^[A-Za-z0-9_\-]{16,128}$",
+    "attachment_id": r"^[A-Za-z0-9_\-]{16,2048}$",
 }
 
 
@@ -217,3 +220,23 @@ def test_pr3l_thread_id_schema_pattern_accepts_realistic_values(tool_name):
         assert pattern.match(value) is not None, (
             f"{tool_name}.thread_id schema pattern unexpectedly rejected realistic value: {value!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# attachment_id schema pattern: the wider {16,2048} bound admits the long
+# real-world IDs (300+ chars) that the old {16,128} cap rejected, which was
+# the bug this change fixes.
+# ---------------------------------------------------------------------------
+
+
+def test_download_attachment_id_schema_pattern_accepts_long_id():
+    """download_attachment.attachment_id schema pattern accepts a ~320-char
+    id (real Gmail attachment IDs exceed the old 128 cap) up to the 2048
+    DoS bound, and still rejects too-short and adversarial shapes."""
+    tool_def = next(d for d in TOOL_DEFINITIONS if d["name"] == "download_attachment")
+    pattern = re.compile(tool_def["inputSchema"]["properties"]["attachment_id"]["pattern"])
+    assert pattern.match("L" * 320) is not None
+    assert pattern.match("L" * 2048) is not None
+    assert pattern.match("L" * 2049) is None  # upper DoS bound
+    assert pattern.match("short") is None  # < 16 chars
+    assert pattern.match("id\r\nX-Injected: 1") is None  # CRLF still rejected

@@ -14,13 +14,13 @@ module over the 300 LOC project rule even after trimming.
 from __future__ import annotations
 
 # Plausible Gmail-shaped IDs that satisfy the canonical pattern
-# `^[A-Za-z0-9_\-]{1,256}$`. attachment_id needs {16,128} chars.
+# `^[A-Za-z0-9_\-]{1,256}$`. attachment_id needs {16,2048} chars.
 GMAIL_ID = "MSG_1A2B3C"
 THREAD_ID = "THR_X"
 LABEL_ID = "Label_42"
 DRAFT_ID = "DRFT_1"
 FILTER_ID = "FLT_1"
-ATTACH_ID = "att_aaaaaaaaaaaaaaaaaa"  # 22 chars, satisfies {16,128}
+ATTACH_ID = "att_aaaaaaaaaaaaaaaaaa"  # 22 chars, satisfies {16,2048}
 EMAIL = "user@example.com"
 
 
