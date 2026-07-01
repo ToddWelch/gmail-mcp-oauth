@@ -29,31 +29,35 @@ from .gmail_id import _ATTACHMENT_VALIDATION_PATTERN
 
 
 def _enumerate_attachment_parts(payload: dict[str, Any]) -> list[dict[str, Any]]:
-    """Walk a Gmail `payload` tree and list its selectable attachment parts.
+    """Walk a Gmail `payload` tree and list its downloadable attachment parts.
 
     Depth-first PREORDER over `payload` then each nested `parts` entry,
     so the returned list is in message document order. A part counts as
-    a selectable attachment when it has BOTH a non-empty `filename` and a
-    `body.attachmentId` (a server-side attachment reference). Inline-data
-    parts (`body.data` present, `body.attachmentId` absent) are excluded:
-    they carry no attachmentId to hand to `get_attachment`, so filename /
-    part_index selection never sees them.
+    downloadable when it has a `body.attachmentId` (a server-side
+    attachment reference), REGARDLESS of whether it has a filename:
+    inline/related parts (e.g. embedded images) often carry an
+    attachmentId with no filename and are legitimately downloadable, so
+    they must remain reachable by part_index (and by their raw
+    attachment_id). Their `filename` is stored as None. Parts with NO
+    attachmentId (small inline `body.data`) are excluded: they are not
+    server-side downloadable.
 
-    Returns a list of `{attachment_id, filename, mime_type}` dicts. This
-    is the single source of truth backing both the part_index lookup and
-    the ambiguous-filename candidate list.
+    Returns a list of `{attachment_id, filename, mime_type}` dicts
+    (filename may be None). This is the single source of truth backing
+    both the part_index lookup and the ambiguous-filename candidate list;
+    filename selection is an exact match over the enumerated filenames, so
+    nameless parts never match a filename query.
     """
     out: list[dict[str, Any]] = []
 
     def _walk(part: dict[str, Any]) -> None:
         body = part.get("body") or {}
-        filename = part.get("filename") or ""
         attachment_id = body.get("attachmentId")
-        if filename and attachment_id:
+        if attachment_id:
             out.append(
                 {
                     "attachment_id": attachment_id,
-                    "filename": filename,
+                    "filename": part.get("filename") or None,
                     "mime_type": part.get("mimeType"),
                 }
             )
@@ -109,11 +113,15 @@ async def download_attachment(
         fetched directly; metadata is best-effort enrichment.
       - `filename`: exact, case-sensitive match against the message's
         attachment filenames. Ambiguous (multiple parts share the name)
-        -> bad_request listing the candidate part_index values.
-      - `part_index`: 0-based index into the ordered list of attachment
-        parts (document order; only parts that have a server-side
-        attachmentId).
-    Zero or more-than-one selector -> bad_request.
+        -> bad_request listing the candidate part_index values. Nameless
+        inline parts have no filename and are not reachable this way.
+      - `part_index`: 0-based index into the ordered list of downloadable
+        parts (document order over every part that has a server-side
+        attachmentId; a part's filename may be absent for inline
+        attachments, in which case the enriched `filename` is null).
+    Parts with no attachmentId (small inline body.data) are not
+    downloadable and are never enumerated. Zero or more-than-one
+    selector -> bad_request.
 
     Fetch order and failure semantics:
       - attachment_id mode: after the malformed-id early reject,

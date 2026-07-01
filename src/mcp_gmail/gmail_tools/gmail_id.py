@@ -129,7 +129,11 @@ def validate_gmail_id(value: object, *, field: str) -> str:
     """
     if not isinstance(value, str):
         raise ValueError(f"{field} must be a string, got {type(value).__name__}")
-    if not _VALIDATION_PATTERN.match(value):
+    # fullmatch (not match): Python's `$` matches just before a trailing
+    # newline, so `match()` would accept "AAAA...\n". A trailing CR/LF is
+    # whitespace outside the URL-safe alphabet and must be rejected before
+    # the value is interpolated into a Gmail URL path.
+    if not _VALIDATION_PATTERN.fullmatch(value):
         # The value is included in the message because callers see the
         # ValueError translated to a bad_request_error dict; the user
         # needs to see what they sent. The dispatcher's audit logger
@@ -153,7 +157,9 @@ def validate_attachment_id(value: object, *, field: str = "attachment_id") -> st
     """
     if not isinstance(value, str):
         raise ValueError(f"{field} must be a string, got {type(value).__name__}")
-    if not _ATTACHMENT_VALIDATION_PATTERN.match(value):
+    # fullmatch (not match): reject a trailing CR/LF that Python's `$`
+    # would otherwise allow (see validate_gmail_id).
+    if not _ATTACHMENT_VALIDATION_PATTERN.fullmatch(value):
         raise ValueError(f"{field} does not match Gmail attachment ID pattern: {value!r}")
     return value
 
@@ -175,4 +181,6 @@ def id_looks_valid_audit_heuristic(value: str | None) -> bool:
         return True
     if not isinstance(value, str):
         return False
-    return bool(_AUDIT_HEURISTIC_PATTERN.match(value))
+    # fullmatch for consistency with the hard validators: a trailing
+    # CR/LF fails the heuristic and is promoted to WARN.
+    return bool(_AUDIT_HEURISTIC_PATTERN.fullmatch(value))

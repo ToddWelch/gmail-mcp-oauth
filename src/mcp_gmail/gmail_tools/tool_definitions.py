@@ -109,11 +109,13 @@ _DOWNLOAD_ATTACHMENT_DEF: dict[str, Any] = {
         "payload.parts[*].body.attachmentId); (2) `filename` (exact, "
         "case-sensitive; if two attachments share the name it is "
         "rejected, disambiguate with part_index); (3) `part_index` "
-        "(0-based document order over the message's attachments that "
-        "have a server-side attachmentId; inline-data parts are not "
-        "counted). Supplying zero or more than one selector is "
-        "rejected. Prefer filename or part_index so you never have to "
-        "handle the long attachment_id yourself."
+        "(0-based document order over every part that has a server-side "
+        "attachmentId; a part's filename may be absent for inline "
+        "attachments, so filename is null for those; parts with no "
+        "attachmentId are not downloadable and are not counted). "
+        "Supplying zero or more than one selector is rejected. Prefer "
+        "filename or part_index so you never have to handle the long "
+        "attachment_id yourself."
     ),
     "inputSchema": {
         "type": "object",
@@ -149,9 +151,10 @@ _DOWNLOAD_ATTACHMENT_DEF: dict[str, Any] = {
                 "type": "integer",
                 "description": (
                     "Select the attachment by 0-based index into the "
-                    "message's attachment parts in document order "
-                    "(only parts that have a server-side attachmentId). "
-                    "Optional; one of the three selection modes."
+                    "message's downloadable parts in document order "
+                    "(every part that has a server-side attachmentId, "
+                    "including nameless inline attachments). Optional; "
+                    "one of the three selection modes."
                 ),
                 "minimum": 0,
             },

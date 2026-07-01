@@ -256,8 +256,9 @@ async def test_download_attachment_by_filename(client):
 
 @pytest.mark.asyncio
 async def test_download_attachment_by_part_index(client):
-    """part_index is 0-based document order over selectable attachments;
-    index 0 is report.pdf, index 1 is logo.png (the inline image is skipped)."""
+    """part_index is 0-based document order over every part with an
+    attachmentId: index 0 is report.pdf, index 1 is logo.png, index 2 is
+    the nameless inline image (all three are enumerated)."""
     with respx.mock(base_url=GMAIL_API_BASE) as router:
         router.get("/users/me/messages/M1").mock(
             return_value=httpx.Response(200, json=_full_message_payload())
@@ -268,6 +269,24 @@ async def test_download_attachment_by_part_index(client):
         r = await messages.download_attachment(client=client, message_id="M1", part_index=1)
     assert att_route.called is True
     assert r["filename"] == "logo.png"
+
+
+@pytest.mark.asyncio
+async def test_download_attachment_nameless_inline_part_reachable_by_index(client):
+    """FIX-1: a part with an attachmentId but NO filename (nameless inline
+    attachment) is enumerated and reachable by part_index; its enriched
+    filename is null. It sits at index 2 (after report.pdf and logo.png)."""
+    inline_id = "INLINE_NOFILENAME_1"
+    with respx.mock(base_url=GMAIL_API_BASE) as router:
+        router.get("/users/me/messages/M1").mock(
+            return_value=httpx.Response(200, json=_full_message_payload())
+        )
+        att_route = router.get(f"/users/me/messages/M1/attachments/{inline_id}").mock(
+            return_value=httpx.Response(200, json={"size": 22, "data": "Z2lm"})
+        )
+        r = await messages.download_attachment(client=client, message_id="M1", part_index=2)
+    assert att_route.called is True
+    assert r == {"filename": None, "mime_type": "image/gif", "size": 22, "data": "Z2lm"}
 
 
 @pytest.mark.asyncio

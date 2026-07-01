@@ -164,6 +164,30 @@ def test_validate_attachment_id_rejects_non_string():
         validate_attachment_id(12345, field="attachment_id")
 
 
+# Trailing CR/LF bypass: Python's `$` matches before a final newline, so
+# `.match()` would accept "AAAA...\n". The validators use `.fullmatch()`,
+# which rejects it. These guard that hardening.
+
+
+@pytest.mark.parametrize("suffix", ["\n", "\r", "\r\n"])
+def test_validate_gmail_id_rejects_trailing_newline(suffix):
+    with pytest.raises(ValueError):
+        validate_gmail_id("A" * 20 + suffix, field="message_id")
+
+
+@pytest.mark.parametrize("suffix", ["\n", "\r", "\r\n"])
+def test_validate_attachment_id_rejects_trailing_newline(suffix):
+    with pytest.raises(ValueError):
+        validate_attachment_id("A" * 20 + suffix, field="attachment_id")
+
+
+def test_audit_heuristic_rejects_trailing_newline():
+    """The audit heuristic uses fullmatch too, so a trailing newline id
+    no longer 'looks valid' and would promote the audit line to WARN."""
+    assert id_looks_valid_audit_heuristic("A" * 20) is True
+    assert id_looks_valid_audit_heuristic("A" * 20 + "\n") is False
+
+
 def test_validate_gmail_id_rejects_non_string():
     """Non-string types fail before regex evaluation."""
     with pytest.raises(ValueError) as excinfo:
