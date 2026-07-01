@@ -11,6 +11,8 @@ router uses is what gets covered.
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import httpx
 import pytest
 import respx
@@ -200,8 +202,8 @@ async def test_download_attachment_by_id_no_matching_part_degrades(client):
 
 @pytest.mark.asyncio
 async def test_download_attachment_by_id_enrichment_error_degrades(client):
-    """AMEND-4(a): if the best-effort enrichment get_message errors, the
-    bytes still return with null metadata."""
+    """AMEND-4(a): if the best-effort enrichment get_message errors
+    (GmailApiError), the bytes still return with null metadata."""
     with respx.mock(base_url=GMAIL_API_BASE) as router:
         router.get(f"/users/me/messages/M1/attachments/{PDF_ID}").mock(
             return_value=httpx.Response(200, json={"size": 1234, "data": "cGRm"})
@@ -209,6 +211,30 @@ async def test_download_attachment_by_id_enrichment_error_degrades(client):
         router.get("/users/me/messages/M1").mock(return_value=httpx.Response(500, json={}))
         r = await messages.download_attachment(client=client, message_id="M1", attachment_id=PDF_ID)
     assert r == {"filename": None, "mime_type": None, "size": 1234, "data": "cGRm"}
+
+
+@pytest.mark.asyncio
+async def test_download_attachment_by_id_enrichment_walker_raises_degrades(client):
+    """FIX-3 (Codex finding 3): a NON-GmailApiError during enrichment
+    (here the parts walker raises on a malformed/deeply-nested payload)
+    must NOT drop the already-fetched bytes. The id-path enrichment
+    catches broad Exception, so it degrades to null metadata and still
+    returns the bytes."""
+    with respx.mock(base_url=GMAIL_API_BASE) as router:
+        router.get(f"/users/me/messages/M1/attachments/{PDF_ID}").mock(
+            return_value=httpx.Response(200, json={"size": 7, "data": "Ynl0ZXM"})
+        )
+        router.get("/users/me/messages/M1").mock(
+            return_value=httpx.Response(200, json=_full_message_payload())
+        )
+        with patch(
+            "mcp_gmail.gmail_tools.attachment_download._enumerate_attachment_parts",
+            side_effect=TypeError("malformed payload"),
+        ):
+            r = await messages.download_attachment(
+                client=client, message_id="M1", attachment_id=PDF_ID
+            )
+    assert r == {"filename": None, "mime_type": None, "size": 7, "data": "Ynl0ZXM"}
 
 
 @pytest.mark.asyncio

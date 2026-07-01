@@ -156,9 +156,16 @@ async def download_attachment(
                 )
             # Bytes are return-critical: fetch them first.
             att = await client.get_attachment(message_id=message_id, attachment_id=attachment_id)
-            # Enrichment is best-effort. A GmailApiError here (or no
-            # matching part) degrades to null metadata; the bytes still
-            # ship. These are two distinct causes, one graceful outcome.
+            # Enrichment is best-effort and MUST NOT drop the bytes. Once
+            # get_attachment has returned, the id-path contract is "bytes
+            # always win": ANY enrichment failure (a GmailApiError on the
+            # extra get_message, OR a non-HTTP error such as the walker
+            # tripping on a malformed/deeply-nested payload, OR simply no
+            # matching part) degrades to null metadata while the bytes
+            # still ship. We catch broad `Exception` deliberately here:
+            # it excludes BaseException (asyncio.CancelledError,
+            # KeyboardInterrupt), so cancellation still propagates. This
+            # is not a stray bare-except; the wide scope is the contract.
             match_filename: str | None = None
             match_mime: str | None = None
             try:
@@ -168,7 +175,7 @@ async def download_attachment(
                 if match is not None:
                     match_filename = match["filename"]
                     match_mime = match["mime_type"]
-            except GmailApiError:
+            except Exception:  # broad by contract (see note above); excludes BaseException
                 pass
             return _attachment_result(filename=match_filename, mime_type=match_mime, payload=att)
 
