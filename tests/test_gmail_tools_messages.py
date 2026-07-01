@@ -32,9 +32,10 @@ LONG_ID = "L" * 320  # ~320 chars: exceeds the old 128 cap, within {16,2048}
 
 
 def _full_message_payload() -> dict:
-    """A multipart message with two selectable attachments (report.pdf,
-    then a nested logo.png) plus a text part and an inline image that has
-    an attachmentId but NO filename (excluded from enumeration)."""
+    """A multipart message with three downloadable attachments in
+    document order: report.pdf (0), nested logo.png (1), and a nested
+    inline image with an attachmentId but NO filename (2). Also a text
+    part with only body.data (no attachmentId) which is NOT enumerated."""
     return {
         "id": "M1",
         "payload": {
@@ -59,7 +60,8 @@ def _full_message_payload() -> dict:
                             "body": {"attachmentId": PNG_ID, "size": 555},
                         },
                         {
-                            # inline image: attachmentId present, filename empty -> excluded
+                            # inline image: attachmentId present, filename empty ->
+                            # enumerated (reachable by part_index, filename is null)
                             "mimeType": "image/gif",
                             "filename": "",
                             "body": {"attachmentId": "INLINE_NOFILENAME_1", "size": 22},
@@ -69,6 +71,15 @@ def _full_message_payload() -> dict:
             ],
         },
     }
+
+
+def _deeply_nested_payload(levels: int) -> dict:
+    """A payload nested `levels` deep via repeated single-child `parts`.
+    With levels > _MAX_MIME_DEPTH the walker raises _MimeTooDeepError."""
+    node: dict = {"mimeType": "text/plain", "filename": "", "body": {}}
+    for _ in range(levels):
+        node = {"mimeType": "multipart/mixed", "filename": "", "body": {}, "parts": [node]}
+    return {"id": "M1", "payload": node}
 
 
 @pytest.fixture
@@ -313,6 +324,38 @@ async def test_download_attachment_nameless_inline_part_reachable_by_index(clien
         r = await messages.download_attachment(client=client, message_id="M1", part_index=2)
     assert att_route.called is True
     assert r == {"filename": None, "mime_type": "image/gif", "size": 22, "data": "Z2lm"}
+
+
+@pytest.mark.asyncio
+async def test_download_attachment_deep_nesting_load_bearing_bad_request(client):
+    """FIX-A: a pathologically deep MIME tree on the load-bearing
+    filename/part_index path returns a typed bad_request (not an
+    unhandled RecursionError escaping route_tool), and no attachment is
+    fetched."""
+    deep = _deeply_nested_payload(150)
+    with respx.mock(base_url=GMAIL_API_BASE, assert_all_called=False) as router:
+        router.get("/users/me/messages/M1").mock(return_value=httpx.Response(200, json=deep))
+        att_route = router.get(url__regex=r".*/attachments/.*").mock(
+            return_value=httpx.Response(200, json={"size": 1, "data": "YQ"})
+        )
+        r = await messages.download_attachment(client=client, message_id="M1", part_index=0)
+        assert att_route.called is False
+    assert r["code"] == ToolErrorCode.BAD_REQUEST
+
+
+@pytest.mark.asyncio
+async def test_download_attachment_deep_nesting_id_path_degrades(client):
+    """FIX-A + FIX-3: a deep MIME tree raised during id-path enrichment is
+    swallowed by the broad best-effort except; the bytes still return with
+    null metadata."""
+    deep = _deeply_nested_payload(150)
+    with respx.mock(base_url=GMAIL_API_BASE) as router:
+        router.get(f"/users/me/messages/M1/attachments/{PDF_ID}").mock(
+            return_value=httpx.Response(200, json={"size": 4, "data": "ZGF0"})
+        )
+        router.get("/users/me/messages/M1").mock(return_value=httpx.Response(200, json=deep))
+        r = await messages.download_attachment(client=client, message_id="M1", attachment_id=PDF_ID)
+    assert r == {"filename": None, "mime_type": None, "size": 4, "data": "ZGF0"}
 
 
 @pytest.mark.asyncio

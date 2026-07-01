@@ -28,6 +28,25 @@ from .gmail_client import GmailApiError, GmailClient
 from .gmail_id import _ATTACHMENT_VALIDATION_PATTERN
 
 
+# Maximum MIME nesting depth the walker will descend before bailing out.
+# The payload tree is sender-influenced, so an unbounded recursive walk
+# over a pathologically deep message could raise RecursionError. 100 is
+# far above any real Gmail message (a handful of multipart levels) yet
+# far below Python's default ~1000 recursion limit, so the walker stops
+# with a typed signal long before the interpreter's own limit.
+_MAX_MIME_DEPTH = 100
+
+
+class _MimeTooDeepError(Exception):
+    """Payload MIME nesting exceeded `_MAX_MIME_DEPTH`.
+
+    A module-local sentinel (not a caller-facing error shape). The
+    load-bearing filename/part_index path translates it into a typed
+    bad_request_error; the id-path enrichment swallows it via its broad
+    best-effort except (bytes still ship).
+    """
+
+
 def _enumerate_attachment_parts(payload: dict[str, Any]) -> list[dict[str, Any]]:
     """Walk a Gmail `payload` tree and list its downloadable attachment parts.
 
@@ -47,10 +66,17 @@ def _enumerate_attachment_parts(payload: dict[str, Any]) -> list[dict[str, Any]]
     both the part_index lookup and the ambiguous-filename candidate list;
     filename selection is an exact match over the enumerated filenames, so
     nameless parts never match a filename query.
+
+    Raises `_MimeTooDeepError` if the payload nests deeper than
+    `_MAX_MIME_DEPTH` (a bounded guard against RecursionError on a
+    pathologically deep, sender-influenced MIME tree). Callers translate
+    or swallow that sentinel per their contract.
     """
     out: list[dict[str, Any]] = []
 
-    def _walk(part: dict[str, Any]) -> None:
+    def _walk(part: dict[str, Any], depth: int) -> None:
+        if depth > _MAX_MIME_DEPTH:
+            raise _MimeTooDeepError(f"MIME nesting exceeded {_MAX_MIME_DEPTH} levels")
         body = part.get("body") or {}
         attachment_id = body.get("attachmentId")
         if attachment_id:
@@ -63,10 +89,10 @@ def _enumerate_attachment_parts(payload: dict[str, Any]) -> list[dict[str, Any]]
             )
         for child in part.get("parts") or []:
             if isinstance(child, dict):
-                _walk(child)
+                _walk(child, depth + 1)
 
     if isinstance(payload, dict):
-        _walk(payload)
+        _walk(payload, 0)
     return out
 
 
@@ -149,8 +175,12 @@ async def download_attachment(
         if attachment_id is not None:
             # Early reject a malformed id against the canonical attachment
             # pattern (defined once in gmail_id) so a bad id surfaces as
-            # bad_request with NO upstream round trip.
-            if not _ATTACHMENT_VALIDATION_PATTERN.match(attachment_id):
+            # bad_request with NO upstream round trip. fullmatch (not
+            # match) for consistency with validate_attachment_id: match's
+            # `$` accepts a trailing newline, which the fullmatch gates
+            # downstream reject, so rejecting it here keeps the handler's
+            # clean bad_request_error the single source of the verdict.
+            if not _ATTACHMENT_VALIDATION_PATTERN.fullmatch(attachment_id):
                 return bad_request_error(
                     f"attachment_id does not match Gmail attachment ID pattern: {attachment_id!r}"
                 )
@@ -181,7 +211,17 @@ async def download_attachment(
 
         # filename / part_index: the message fetch is load-bearing.
         full = await client.get_message(message_id=message_id, format="full")
-        parts = _enumerate_attachment_parts(full.get("payload") or {})
+        try:
+            parts = _enumerate_attachment_parts(full.get("payload") or {})
+        except _MimeTooDeepError:
+            # On the load-bearing path the walker result is required to
+            # resolve the selector; surface a typed, actionable error
+            # rather than letting a RecursionError-class failure escape
+            # route_tool as an untyped internal error.
+            return bad_request_error(
+                "message MIME structure is too deeply nested to resolve the "
+                "filename/part_index selector; download by attachment_id instead"
+            )
 
         if filename is not None:
             candidates = [i for i, p in enumerate(parts) if p["filename"] == filename]
