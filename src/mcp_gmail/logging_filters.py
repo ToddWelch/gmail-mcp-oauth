@@ -104,6 +104,12 @@ SENSITIVE_KEYS = (
     # any pending_token that slips through into a body-level log
     # call (e.g. an exception path that captures request data).
     "pending_token",
+    # the attachment upload-slot capability token. It travels in the
+    # X-Upload-Token header (kept out of access logs by construction),
+    # but this entry scrubs any `upload_token=...` / `"upload_token":`
+    # shape that reaches a body-level log call. The distinct name (not
+    # a bare `token`) avoids over-redacting page_token / pending_token.
+    "upload_token",
 )
 
 # Matches `key=value` (form-encoded). value runs to & or whitespace.

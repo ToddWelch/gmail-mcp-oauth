@@ -23,6 +23,7 @@ from mcp_gmail.db import Base, _normalize_database_url  # noqa: E402
 from mcp_gmail import token_store  # noqa: F401, E402
 from mcp_gmail import state_store  # noqa: F401, E402
 from mcp_gmail import pending_link_store  # noqa: F401, E402
+from mcp_gmail import attachment_upload_store  # noqa: F401, E402
 
 config = context.config
 

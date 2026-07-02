@@ -1,22 +1,14 @@
 """TOOL_DEFINITIONS_WRITE: JSON Schema manifest for the write-side tools.
 
 Imported and concatenated by gmail_tools/__init__.py so the public
-TOOL_DEFINITIONS list remains a single ordered list. The tools are
-split across this file and tool_definitions_admin.py purely to honor
-the 300-LOC-per-file rule:
+TOOL_DEFINITIONS list stays a single ordered list. Split across this
+file (8 send/draft/upload tools) and tool_definitions_admin.py (11
+admin tools) purely to honor the 300-LOC-per-file rule.
 
-    this file: 7 send/draft tools
-        send_email, create_draft, update_draft, list_drafts,
-        send_draft, delete_draft, reply_all
-    tool_definitions_admin.py: 11 admin tools
-        labels + filters + delete (8 originals) plus
-        batch_modify_emails, get_or_create_label,
-        create_filter_from_template (3 cleanup additions)
-
-Tool names MUST match the names registered in tool_router_write.py and
-in scope_check.py's TOOL_SCOPE_REQUIREMENTS table. Any rename or
-addition needs to update all three files (the manifest, the
-dispatch table, and the scope-requirements table) in the same change.
+Tool names MUST match the names registered in tool_router_write.py (or
+the dispatch short-circuits) and scope_check.py's
+TOOL_SCOPE_REQUIREMENTS table; a rename or addition updates all three
+in the same change.
 """
 
 from __future__ import annotations
@@ -24,6 +16,7 @@ from __future__ import annotations
 from typing import Any
 
 from .tool_definitions_admin import TOOL_DEFINITIONS_ADMIN
+from .tool_definitions_upload import TOOL_DEFINITIONS_UPLOAD
 from .tool_schemas import (
     ACCOUNT_EMAIL_PROP,
     ATTACHMENT_PROP,
@@ -80,7 +73,10 @@ _SEND_EMAIL_DEF: dict[str, Any] = {
         "Send a new email via Gmail. Builds an RFC 5322 message, "
         "enforces the 25 MiB encoded-size cap, and POSTs to "
         "users.messages.send. Optional `idempotency_key` dedupes "
-        "retries within a 60s window keyed by (account, key)."
+        "retries within a 60s window keyed by (account, key). "
+        "Attachments accept an inline shape or an upload-handle shape "
+        "({source:'upload', upload_token}); handles are consumed on send, "
+        "so a send that fails after consume needs a fresh slot, not a retry."
     ),
     "inputSchema": {
         "type": "object",
@@ -102,7 +98,9 @@ _CREATE_DRAFT_DEF: dict[str, Any] = {
         "Returns the draft id. Optional `thread_id` sets the "
         "authoritative thread join on the underlying Gmail message; "
         "header-only threading via reply_to_message_id / "
-        "reply_to_references is best-effort fallback."
+        "reply_to_references is best-effort fallback. Attachments accept "
+        "the inline or upload-handle shape; upload handles are consumed "
+        "when the draft is created."
     ),
     "inputSchema": {
         "type": "object",
@@ -124,7 +122,8 @@ _UPDATE_DRAFT_DEF: dict[str, Any] = {
         "Optional `thread_id` sets the authoritative thread "
         "join on the underlying Gmail message; header-only threading "
         "via reply_to_message_id / reply_to_references is best-effort "
-        "fallback."
+        "fallback. Attachments accept the inline or upload-handle shape; "
+        "upload handles are consumed when the draft is updated."
     ),
     "inputSchema": {
         "type": "object",
@@ -237,7 +236,9 @@ _REPLY_ALL_DEF: dict[str, Any] = {
         "set is capped at 100. Idempotency cache is shared with "
         "send_email; do not reuse the same idempotency_key for both "
         "tools. Subject is prefixed with 'Re: ' unless it already "
-        "starts with 'Re:'. Requires gmail.send scope."
+        "starts with 'Re:'. Requires gmail.send scope. Attachments "
+        "accept the inline or upload-handle shape; upload handles are "
+        "single-use and consumed on send (re-mint if a send fails)."
     ),
     "inputSchema": {
         "type": "object",
@@ -267,21 +268,25 @@ _REPLY_ALL_DEF: dict[str, Any] = {
 }
 
 
-# Public manifest. Order: 6 send/drafts, 1 reply_all,
-# then 8 admin + 3 cleanup admin (appended from
-# tool_definitions_admin.py).
-TOOL_DEFINITIONS_WRITE: list[dict[str, Any]] = [
-    _SEND_EMAIL_DEF,
-    _CREATE_DRAFT_DEF,
-    _UPDATE_DRAFT_DEF,
-    _LIST_DRAFTS_DEF,
-    _SEND_DRAFT_DEF,
-    _DELETE_DRAFT_DEF,
-    _REPLY_ALL_DEF,
-] + list(TOOL_DEFINITIONS_ADMIN)
+# Public manifest. Order: 1 upload slot (spliced from
+# tool_definitions_upload.py), 6 send/drafts, 1 reply_all, then 8 admin
+# + 3 cleanup admin (spliced from tool_definitions_admin.py).
+TOOL_DEFINITIONS_WRITE: list[dict[str, Any]] = (
+    list(TOOL_DEFINITIONS_UPLOAD)
+    + [
+        _SEND_EMAIL_DEF,
+        _CREATE_DRAFT_DEF,
+        _UPDATE_DRAFT_DEF,
+        _LIST_DRAFTS_DEF,
+        _SEND_DRAFT_DEF,
+        _DELETE_DRAFT_DEF,
+        _REPLY_ALL_DEF,
+    ]
+    + list(TOOL_DEFINITIONS_ADMIN)
+)
 
 
-assert len(TOOL_DEFINITIONS_WRITE) == 18, (
-    f"write manifest must define exactly 18 tools (7 send/draft + 11 admin), "
+assert len(TOOL_DEFINITIONS_WRITE) == 19, (
+    f"write manifest must define exactly 19 tools (8 send/draft/upload + 11 admin), "
     f"got {len(TOOL_DEFINITIONS_WRITE)}"
 )

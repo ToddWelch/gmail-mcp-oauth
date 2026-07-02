@@ -1,55 +1,33 @@
 """Write-side reply_all tool.
 
-Split from send.py to honor the project's 300-LOC per-file ceiling:
-send.py is at 214 LOC and adding reply_all inline would push it
-past the limit.
+Split from send.py to honor the 300-LOC per-file ceiling.
 
-What reply_all does
--------------------
 Given a `message_id` already in the linked mailbox, reply to ALL
-recipients of that message:
+recipients: To the original `From`; Cc the original `To` + `Cc` minus
+the linked account's own address. Threaded via `In-Reply-To` /
+`References` set to the original Message-ID; built through the same
+build_email_message + 25 MiB cap path send_email uses.
 
-  - To the original `From` address.
-  - Cc the original `To` and `Cc` addresses, minus the linked account's
-    own email address (because Gmail does not show your own reply to
-    yourself in the natural inbox flow).
+Foot-gun mitigations: an empty expanded recipient list ->
+bad_request_error (no silent zero-recipient send); recipient set capped
+at 100; get_user_profile failure -> upstream_error (no silent
+include-everyone fallback).
 
-The reply is threaded by setting `In-Reply-To` and `References` to
-the original message's RFC 5322 Message-ID header. The send goes
-through the same build_email_message + 25 MiB cap path that send_email
-uses, and shares the same idempotency cache.
-
-Foot-gun mitigations
--------------------------------------
-- "Replies to ALL recipients on the original message (To + Cc minus
-  self)" is documented in the tool description.
-- Empty expanded recipient list -> bad_request_error("no recipients
-  to reply to"). Silent send with zero recipients is forbidden.
-- Recipient set capped at 100 (matches EMAIL_LIST_PROP in
-  tool_schemas.py).
-- get_user_profile failure -> upstream_error (NOT silent fallback to
-  "include everyone in the recipient set").
-- Threading headers handled by build_email_message via
-  reply_to_message_id + reply_to_references; we do not roll our own
-  In-Reply-To/References.
-
-Idempotency cache
-----------------------------------
-Same cache as send_email. Cache key = (auth0_sub, account_email,
-idempotency_key). Caller-facing tool description warns that the
-cache is shared between send_email and reply_all, so reusing the
-same key for both produces a cache hit and skips the second tool.
+Idempotency cache is shared with send_email (key = (auth0_sub,
+account_email, idempotency_key)); reusing a key across both produces a
+cache hit and skips the second tool. The cache is READ before any upload
+slot is consumed, so a cache hit consumes no slot.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
+from .attachment_source import resolve_attachments
 from .errors import bad_request_error, upstream_error
 from .gmail_client import GmailApiError, GmailClient
 from .idempotency import IdempotencyCache, default_cache
 from .message_format import (
-    Attachment,
     OversizeMessage,
     build_email_message,
     message_to_base64url,
@@ -138,9 +116,11 @@ async def reply_all(
     account_email: str,
     message_id: str,
     body_text: str,
-    attachments: list[Attachment] | None = None,
+    attachments: list[dict[str, Any]] | None = None,
     idempotency_key: str | None = None,
     cache: IdempotencyCache | None = None,
+    encryption_key: str | None = None,
+    prior_encryption_keys: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Reply to all recipients of `message_id`.
 
@@ -274,6 +254,20 @@ async def reply_all(
         else:
             refs_list = [message_id_header]
 
+    # ---- attachments (consume upload slots AFTER the reads succeed) --------
+    # Resolving here (not at the top) means a bad message_id or a
+    # getProfile failure does not spend an upload slot; the cache read at
+    # the top already short-circuited before any consume on a hit.
+    resolved = resolve_attachments(
+        raw=attachments,
+        auth0_sub=auth0_sub,
+        account_email=account_email,
+        encryption_key=encryption_key,
+        prior_encryption_keys=prior_encryption_keys,
+    )
+    if isinstance(resolved, dict):  # error dict
+        return resolved
+
     # ---- build the message ------------------------------------------------
     try:
         msg = build_email_message(
@@ -282,7 +276,7 @@ async def reply_all(
             subject=new_subject,
             body_text=body_text,
             cc=reply_cc or None,
-            attachments=attachments,
+            attachments=resolved or None,
             reply_to_message_id=message_id_header,
             reply_to_references=refs_list,
         )

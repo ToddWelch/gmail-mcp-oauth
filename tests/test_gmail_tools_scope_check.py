@@ -26,9 +26,9 @@ from mcp_gmail.gmail_tools.scope_check import (
 )
 
 
-def test_table_has_exactly_32_tools():
-    """32 tools (11 read + 14 write + 4 cleanup + 1 bootstrap + 2 fanout)."""
-    assert len(TOOL_SCOPE_REQUIREMENTS) == EXPECTED_TOOL_COUNT == 32
+def test_table_has_exactly_33_tools():
+    """33 tools (11 read + 15 write + 4 cleanup + 1 bootstrap + 2 fanout)."""
+    assert len(TOOL_SCOPE_REQUIREMENTS) == EXPECTED_TOOL_COUNT == 33
 
 
 def test_connect_gmail_account_in_table_with_empty_scope_tuple():

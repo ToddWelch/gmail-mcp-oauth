@@ -38,32 +38,27 @@ addresses).
 
 from __future__ import annotations
 
-import base64
-import binascii
 from typing import Any
 
+from .attachment_source import resolve_attachments
 from .errors import bad_request_error
 from .gmail_client import GmailClient
 from .idempotency import IdempotencyCache, default_cache
 from .message_format import (
-    MAX_ENCODED_BYTES,
-    Attachment,
     OversizeMessage,
     build_email_message,
     message_to_base64url,
 )
 
-
-# : pre-decode attachment caps. Validate
-# attachment count and base64-estimated decoded size BEFORE running
-# base64.urlsafe_b64decode on each attachment. The decode itself
-# allocates memory proportional to the encoded length; without the
-# pre-check, an attacker can ship a 50 MiB JSON body containing 100
-# fake attachments and force ~50 MiB of allocations before the
-# downstream OversizeMessage check fires on the assembled message.
-# Cap of 25 attachments matches the count Gmail's UI exposes; the
-# size cap mirrors message_format.MAX_ENCODED_BYTES.
-MAX_ATTACHMENT_COUNT = 25
+# Backward-compat re-exports. The inline-attachment decode helpers moved
+# to attachment_source.py (single home for attachment-input handling);
+# existing references to `send._decode_attachment` /
+# `send.MAX_ATTACHMENT_COUNT` continue to resolve here.
+from .attachment_source import (  # noqa: F401
+    MAX_ATTACHMENT_COUNT,
+    _decode_attachment,
+    _validate_attachments_pre_decode,
+)
 
 
 # Minimum syntactic check: localpart@domain with at least 1 char each.
@@ -87,80 +82,6 @@ def _validate_recipients(recipients: list[str], *, field: str) -> str | None:
     return None
 
 
-def _validate_attachments_pre_decode(attachments: list[Any]) -> dict[str, Any] | None:
-    """cheap pre-decode checks. Returns error dict on failure or None.
-
-    Two cheap checks run before any base64 decoding:
-    1. Count cap: more than MAX_ATTACHMENT_COUNT attachments fails.
-    2. Estimated decoded size: each attachment's `data_base64url`
-       length / 4 * 3 approximates the decoded bytes. Sum across all
-       attachments and reject if the estimate exceeds MAX_ENCODED_BYTES.
-
-    The estimate is intentionally optimistic for the attacker (it
-    rounds DOWN: 4 base64 chars -> 3 raw bytes is the upper bound on
-    decoded size). A real send still runs the post-build OversizeMessage
-    check on the fully-rendered message, which catches the residual.
-    """
-    if not isinstance(attachments, list):
-        return bad_request_error("attachments must be a list")
-    if len(attachments) > MAX_ATTACHMENT_COUNT:
-        return bad_request_error(
-            f"too many attachments: {len(attachments)} > {MAX_ATTACHMENT_COUNT}"
-        )
-    estimated_total = 0
-    for i, att in enumerate(attachments):
-        if not isinstance(att, dict):
-            # Detailed validation runs in _decode_attachment; here we
-            # only fail-fast on the size estimate. Skip non-dicts so
-            # _decode_attachment returns the appropriate per-field error.
-            continue
-        b64 = att.get("data_base64url")
-        if isinstance(b64, str):
-            estimated_total += (len(b64) // 4) * 3
-            if estimated_total > MAX_ENCODED_BYTES:
-                return bad_request_error(
-                    f"attachments[{i}] pushes estimated size over the "
-                    f"{MAX_ENCODED_BYTES}-byte cap before decode"
-                )
-    return None
-
-
-def _decode_attachment(att: dict[str, Any], *, index: int) -> Attachment | dict[str, Any]:
-    """Convert an attachment input dict into an Attachment dataclass.
-
-    Returns either the constructed Attachment or a bad_request_error
-    dict if the input was malformed. Caller must check the return
-    type. This lets the send_email function short-circuit on the
-    first malformed attachment without raising.
-
-    Input shape:
-        {"filename": "...", "mime_type": "...", "data_base64url": "..."}
-
-    `data_base64url` is base64url-encoded bytes (without padding is
-    accepted; we add padding before decoding). We chose base64url over
-    standard base64 to match Gmail's `raw` field convention; callers
-    using download_attachment as input can pass that field directly.
-    """
-    if not isinstance(att, dict):
-        return bad_request_error(f"attachments[{index}] must be an object")
-    filename = att.get("filename")
-    mime_type = att.get("mime_type")
-    data_b64 = att.get("data_base64url")
-    if not isinstance(filename, str) or not filename:
-        return bad_request_error(f"attachments[{index}].filename is required")
-    if not isinstance(mime_type, str) or not mime_type:
-        return bad_request_error(f"attachments[{index}].mime_type is required")
-    if not isinstance(data_b64, str):
-        return bad_request_error(f"attachments[{index}].data_base64url must be a string")
-    # Add padding then decode. urlsafe_b64decode requires padding.
-    padded = data_b64 + "=" * (-len(data_b64) % 4)
-    try:
-        raw = base64.urlsafe_b64decode(padded)
-    except (binascii.Error, ValueError):
-        return bad_request_error(f"attachments[{index}].data_base64url is not valid base64url")
-    return Attachment(filename=filename, mime_type=mime_type, data=raw)
-
-
 # ---------------------------------------------------------------------------
 # Tool: send_email
 # ---------------------------------------------------------------------------
@@ -182,6 +103,8 @@ async def send_email(
     reply_to_references: list[str] | None = None,
     idempotency_key: str | None = None,
     cache: IdempotencyCache | None = None,
+    encryption_key: str | None = None,
+    prior_encryption_keys: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Send an RFC 5322 message via Gmail's users.messages.send endpoint.
 
@@ -189,14 +112,23 @@ async def send_email(
     `auth0_sub` and `account_email` through so the idempotency cache
     key includes the actor partition (Decision 2: prevents cross-actor cache hits).
 
-    `cache` is the idempotency cache instance. Defaults to the
-    module-level singleton in idempotency.py; tests inject their own
-    to avoid coupling cases. When `idempotency_key` is None, the cache
-    is bypassed entirely (no read, no write).
+    Attachments accept two shapes per entry: inline
+    ({filename, mime_type, data_base64url}) and upload-handle
+    ({source:"upload", upload_token}); resolution is delegated to
+    attachment_source.resolve_attachments, which decodes inline and
+    CONSUMES upload slots. `encryption_key` / `prior_encryption_keys`
+    are threaded through from Settings so upload bytes can be decrypted.
 
-    Returns the Gmail send response on success: a dict with `id` (the
-    sent message's Gmail ID) and `threadId`. On bad input or oversize,
-    returns a bad_request_error dict with no Gmail call.
+    Ordering (single-use safety): the idempotency cache is READ before
+    any slot is consumed, so a cache HIT returns the cached result and
+    spends NO slot. On a MISS the slots are consumed BEFORE the single
+    POST so two concurrent sends with the same handle cannot both
+    deliver. If the POST then fails, the slots are already spent; the
+    caller must mint fresh slots before retrying (a dead-token retry
+    will not work).
+
+    Returns the Gmail send response on success (id + threadId). On bad
+    input or oversize, returns a bad_request_error dict with no Gmail call.
     """
     # ---- recipient validation (fail fast before message build) ------------
     err = _validate_recipients(to, field="to")
@@ -211,24 +143,7 @@ async def send_email(
         if err is not None:
             return bad_request_error(err)
 
-    # ---- attachments ------------------------------------------------------
-    decoded_attachments: list[Attachment] = []
-    if attachments is not None:
-        # cheap count + estimated-size guard BEFORE we
-        # spend memory on base64 decode. Saves the worst-case path
-        # where an attacker streams 100 fake attachments of 5 MiB each
-        # and forces 500 MiB of allocations before the assembled-
-        # message cap trips.
-        pre_err = _validate_attachments_pre_decode(attachments)
-        if pre_err is not None:
-            return pre_err
-        for i, raw in enumerate(attachments):
-            decoded = _decode_attachment(raw, index=i)
-            if isinstance(decoded, dict):  # error dict
-                return decoded
-            decoded_attachments.append(decoded)
-
-    # ---- idempotency cache (READ side) ------------------------------------
+    # ---- idempotency cache (READ side, BEFORE consuming any slot) ----------
     cache_obj = cache if cache is not None else default_cache
     cache_key: tuple[str, str, str] | None = None
     if idempotency_key is not None:
@@ -237,11 +152,21 @@ async def send_email(
         cache_key = (auth0_sub, account_email, idempotency_key)
         cached = cache_obj.get(cache_key)
         if cached is not None:
-            # Cache hit. Do NOT call Gmail (M-mitigation: zero POSTs on
-            # cache hit). Returning the cached result preserves the
-            # dedupe contract: the same idempotency_key from the same
-            # actor returns the same message ID for the TTL window.
+            # Cache hit. Do NOT call Gmail and do NOT consume any upload
+            # slot (zero POSTs, zero consumes on cache hit). The dedupe
+            # contract returns the same message ID for the TTL window.
             return cached
+
+    # ---- attachments (decode inline + consume upload slots) ---------------
+    resolved = resolve_attachments(
+        raw=attachments,
+        auth0_sub=auth0_sub,
+        account_email=account_email,
+        encryption_key=encryption_key,
+        prior_encryption_keys=prior_encryption_keys,
+    )
+    if isinstance(resolved, dict):  # error dict
+        return resolved
 
     # ---- build the message ------------------------------------------------
     try:
@@ -252,7 +177,7 @@ async def send_email(
             body_text=body_text,
             cc=cc,
             bcc=bcc,
-            attachments=decoded_attachments or None,
+            attachments=resolved or None,
             reply_to_message_id=reply_to_message_id,
             reply_to_references=reply_to_references,
         )

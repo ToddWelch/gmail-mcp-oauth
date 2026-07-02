@@ -250,6 +250,7 @@ async def dispatch_tool_call(
             auth0_sub=ctx.auth0_sub,
             account_email=ctx.account_email,
             granted_scope=granted_scope,
+            settings=settings,
         )
 
     # `result` is either a success dict (Gmail's response body) or an

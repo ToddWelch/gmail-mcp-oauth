@@ -20,6 +20,8 @@ continue to resolve.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -27,6 +29,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from sqlalchemy import text
 
+from . import attachment_upload_store
 from . import config as config_module
 from . import db as db_module
 from . import health as health_module
@@ -34,6 +37,31 @@ from .auth import warm_jwks
 from .logging_filters import install_redacting_filter
 
 logger = logging.getLogger("mcp_gmail")
+
+# Cadence for the in-process attachment-upload purge. Hourly is well
+# under the PII-retention "at least daily" floor; the purge also runs
+# once at startup to clean up rows orphaned by a crash-restart. The
+# single-in-process-loop model is safe because the boot guard
+# (_enforce_replica_constraint) fails closed on multi-replica deploys.
+_ATTACHMENT_PURGE_INTERVAL_SECONDS = 3600
+
+
+def _purge_attachment_uploads_once() -> None:
+    """Best-effort purge of expired/consumed upload slots. Never raises."""
+    try:
+        with db_module.session_scope() as session:
+            removed = attachment_upload_store.purge_expired_and_consumed(session)
+        if removed:
+            logger.info("purged %d expired/consumed attachment upload rows", removed)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("attachment-upload purge failed: %s", type(exc).__name__)
+
+
+async def _attachment_purge_loop() -> None:
+    """Periodic purge loop; cancelled on shutdown."""
+    while True:
+        await asyncio.sleep(_ATTACHMENT_PURGE_INTERVAL_SECONDS)
+        _purge_attachment_uploads_once()
 
 
 def _enforce_replica_constraint() -> None:
@@ -180,9 +208,20 @@ async def lifespan(app: FastAPI):
         health_module.record_failure("jwks", type(exc).__name__)
 
     app.state.settings = settings
+
+    # PII retention: purge expired/consumed attachment-upload rows once
+    # at startup (crash-restart cleanup) and then hourly in-process. A
+    # scheduled purge is required (manual cleanup is not acceptable);
+    # this is the single-process equivalent of a daily cron.
+    _purge_attachment_uploads_once()
+    purge_task = asyncio.create_task(_attachment_purge_loop())
+
     try:
         yield
     finally:
+        # Stop the purge loop cleanly on shutdown.
+        purge_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await purge_task
         # Engine pool teardown happens automatically via the engine's
         # finalizer; nothing to close explicitly.
-        pass

@@ -151,17 +151,17 @@ is Railway-specific beyond reading `DATABASE_URL` at boot.
 
 ## Tool reference
 
-The service exposes 32 tools to MCP clients:
+The service exposes 33 tools to MCP clients:
 
 - 13 read tools (`read_email`, `search_emails`, `multi_search_emails`,
   `batch_read_emails`, `download_attachment`, `download_email`,
   `get_thread`, `list_inbox_threads`, `get_inbox_with_threads`,
   `modify_thread`, `list_email_labels`, `list_filters`, `get_filter`).
-- 14 write tools (`send_email`, `create_draft`, `update_draft`,
-  `list_drafts`, `send_draft`, `delete_draft`, `create_label`,
-  `update_label`, `delete_label`, `modify_email_labels`,
-  `create_filter`, `delete_filter`, `delete_email`,
-  `batch_delete_emails`).
+- 15 write tools (`create_attachment_upload_slot`, `send_email`,
+  `create_draft`, `update_draft`, `list_drafts`, `send_draft`,
+  `delete_draft`, `create_label`, `update_label`, `delete_label`,
+  `modify_email_labels`, `create_filter`, `delete_filter`,
+  `delete_email`, `batch_delete_emails`).
 - 4 cleanup tools (`reply_all`, `batch_modify_emails`,
   `get_or_create_label`, `create_filter_from_template`).
 - 1 bootstrap tool (`connect_gmail_account`).
@@ -212,6 +212,14 @@ or if the new key is in `PRIOR_ENCRYPTION_KEYS`.
   size**, not on raw input bytes. Base64 inflates binary by ~33%,
   so raw attachment data caps at ~18 MiB. Enforced in
   `gmail_tools/message_format.py::build_email_message`.
+- **Large attachments use an upload-slot + handle flow** so the model
+  never reproduces file bytes as base64 (which corrupts binaries like
+  barcoded PDFs). `create_attachment_upload_slot` mints a one-time,
+  user-bound capability token; the client `curl`s the raw bytes to
+  `POST /attachments/upload` (token in the `X-Upload-Token` header,
+  no SSRF/LFI surface); the send/draft tools reference
+  `{source:"upload", upload_token}`. Single-use, 15-minute TTL,
+  Fernet-encrypted at rest. See `docs/GMAIL_MCP_TOOLS.md`.
 - **OAuth scope expansion is opt-in, not default-on**. The default
   `GMAIL_OAUTH_SCOPES` is `openid email gmail.readonly`. Write
   tools surface `scope_insufficient` with a structured
