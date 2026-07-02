@@ -165,6 +165,25 @@ def test_missing_filename_returns_400(client):
     assert r.status_code == 400
 
 
+def test_control_char_filename_rejected_400_nothing_stored(client):
+    # `label%0D%0AX-Bad:%201.pdf` percent-decodes to a CR/LF-bearing name
+    # that would inject MIME headers / crash add_attachment. Reject at the
+    # endpoint with 400 and store nothing.
+    token = _mint()
+    r = client.post(
+        UPLOAD,
+        content=b"data",
+        headers={
+            "X-Upload-Token": token,
+            "Content-Type": "application/pdf",
+            "X-Attachment-Filename": "label%0D%0AX-Bad:%201.pdf",
+        },
+    )
+    assert r.status_code == 400
+    with db_module.session_scope() as session:
+        assert store.find_slot(session, store.hash_token(token)).uploaded_at is None
+
+
 def test_upload_happy_path_stores_encrypted(client):
     token = _mint()
     payload = bytes(range(256)) * 4  # 1 KiB, high-bit bytes

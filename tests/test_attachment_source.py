@@ -234,6 +234,29 @@ def test_consume_race_rolls_back(monkeypatch):
     assert _still_consumable(token)  # rolled back, still usable
 
 
+def test_is_safe_filename():
+    assert attachment_source.is_safe_filename("label.pdf")
+    assert attachment_source.is_safe_filename("발주서-😀.pdf")  # non-ASCII printable OK
+    assert not attachment_source.is_safe_filename("a\r\nX-Bad: 1")  # CR/LF
+    assert not attachment_source.is_safe_filename("a\x00b")  # NUL
+    assert not attachment_source.is_safe_filename("")
+
+
+def test_inline_filename_with_control_char_rejected():
+    data_b64 = base64.urlsafe_b64encode(b"x").rstrip(b"=").decode()
+    result = _resolve(
+        [{"filename": "a\nb.txt", "mime_type": "text/plain", "data_base64url": data_b64}], key=None
+    )
+    assert result["code"] == ToolErrorCode.BAD_REQUEST
+
+
+def test_upload_override_filename_with_control_char_rejected_slot_intact():
+    token = _upload_slot()
+    result = _resolve([{"source": "upload", "upload_token": token, "filename": "bad\r\nX: y.pdf"}])
+    assert result["code"] == ToolErrorCode.BAD_REQUEST
+    assert _still_consumable(token)  # rejected before consume
+
+
 def test_classify_backstop_rejects_ambiguous_and_neither():
     both = {"data_base64url": "aGk", "source": "upload", "upload_token": "A" * 20}
     neither = {"filename": "x"}

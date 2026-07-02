@@ -147,7 +147,10 @@ async def update_draft(
     not_found_error. optional `thread_id` sets `message.threadId`, shape-
     validated in `client.update_draft` via `gmail_id.validate_gmail_id`.
     Upload-slot attachments are consumed AFTER a successful build and
-    BEFORE the Gmail PUT (an oversize draft never burns a slot).
+    BEFORE the Gmail PUT (an oversize draft never burns a slot). When
+    upload slots are at stake, a not-found existence check runs BEFORE
+    consume so a stale draft_id (ordinary caller error) never burns a
+    one-time handle.
     """
     raw = _build_raw_message(
         sender=sender,
@@ -162,8 +165,20 @@ async def update_draft(
     )
     if isinstance(raw, dict):  # error dict (oversize) -> NO slot consumed
         return raw
+    token_hashes = consume_token_hashes or []
+    # Rule out draft-not-found BEFORE consuming: a stale/typo'd draft_id
+    # is a caller-input error, not the documented post-consume Gmail
+    # failure, so it must not burn a one-time upload handle. Only pay the
+    # extra GET when there are upload slots to protect.
+    if token_hashes:
+        try:
+            await client.get_draft(draft_id=draft_id)
+        except GmailApiError as exc:
+            if exc.status == 404:
+                return not_found_error(f"draft not found: {draft_id}")
+            raise
     consume_err = consume_slots(
-        token_hashes=consume_token_hashes or [],
+        token_hashes=token_hashes,
         auth0_sub=auth0_sub,
         account_email=account_email,
     )
@@ -193,12 +208,9 @@ async def list_drafts(
     page_token: str | None = None,
     max_results: int | None = None,
 ) -> dict[str, Any]:
-    """List draft messages.
-
-    Returns Gmail's `users.drafts.list` response verbatim: a dict with
-    `drafts: [...]` (each entry has `id` and `message: {id, threadId}`)
-    and optional `nextPageToken`. A full draft fetch is one Gmail call
-    per ID; this listing is the cheap way to enumerate.
+    """List draft messages: Gmail's `users.drafts.list` response verbatim
+    (`drafts: [{id, message: {id, threadId}}, ...]` + optional
+    `nextPageToken`).
     """
     return await client.list_drafts(
         q=q,
@@ -221,27 +233,19 @@ async def send_draft(
     remove_labels: list[str] | None = None,
     granted_scope: str = "",
 ) -> dict[str, Any]:
-    """Send an existing draft. Requires gmail.send scope.
+    """Send an existing draft (users.drafts.send; requires gmail.send).
 
-    Maps to Gmail's `users.drafts.send` endpoint. Returns the sent
-    message record (id, threadId, labelIds). The draft is consumed by
-    the send (Gmail moves it from DRAFT to SENT label and the draft id
-    no longer resolves).
+    Returns the sent message record (id, threadId, labelIds); the draft
+    is consumed by the send. optional `archive_thread` / `add_labels` /
+    `remove_labels` apply a follow-up modify_thread to the sent thread:
+    send-success + action-fail returns the success record annotated with
+    `post_send_actions.applied=false` + `action_failures` (send is NEVER
+    retried); send-fail returns the error shape with no actions.
 
-    optional `archive_thread`, `add_labels`, `remove_labels`
-    apply a follow-up modify_thread to the sent message's thread.
-    Idempotency: send-success + action-fail returns a success record
-    annotated with `post_send_actions.applied=false` and
-    `action_failures`; the send is NEVER retried. Send-fail returns
-    the existing error shape with no actions attempted.
-
-    Scope: post-send actions need gmail.modify on top of the
-    gmail.send the existing send_draft requires. design note
-    item 22: when the caller asks for any post-send action AND has
-    not granted gmail.modify (subsumed by gmail.modify, full, or
-    set directly), reject at handler entry with bad_request_error
-    pointing at /oauth/start. This avoids surfacing a needs_reauth
-    error AFTER the message was sent.
+    Post-send actions need gmail.modify on top of gmail.send; a caller
+    that requests one without gmail.modify is rejected at handler entry
+    (bad_request_error -> /oauth/start), avoiding a needs_reauth AFTER
+    the message was sent.
     """
     wants_post_send = bool(archive_thread or add_labels or remove_labels)
     if wants_post_send and not granted_scope_satisfies(
@@ -283,11 +287,8 @@ async def delete_draft(
     client: GmailClient,
     draft_id: str,
 ) -> dict[str, Any]:
-    """Delete a draft by ID.
-
-    Gmail returns 204 (empty body) on success; the GmailClient renders
-    that as `{}`. Drafts are not recoverable after delete; this is a
-    permanent operation but does not affect any sent messages.
+    """Delete a draft by ID (permanent, not recoverable; no effect on
+    sent messages). Gmail's 204 renders as `{}`.
     """
     try:
         return await client.delete_draft(draft_id=draft_id)

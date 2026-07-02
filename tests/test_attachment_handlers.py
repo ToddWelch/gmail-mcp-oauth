@@ -209,6 +209,32 @@ async def test_create_draft_upload_handle_consumes_on_create(client):
 
 
 @pytest.mark.asyncio
+async def test_update_draft_stale_id_does_not_burn_slot(client):
+    # A valid-shaped but nonexistent draft_id is an ordinary caller error;
+    # the not-found existence check runs BEFORE consume, so the one-time
+    # upload handle survives and no update PUT is attempted.
+    token = _upload_slot(b"PDFBYTES")
+    with respx.mock(base_url=GMAIL_API_BASE, assert_all_called=False) as router:
+        router.get("/users/me/drafts/DRFT_1").mock(
+            return_value=httpx.Response(404, json={"error": {"code": 404}})
+        )
+        put_route = router.put("/users/me/drafts/DRFT_1").mock(
+            return_value=httpx.Response(200, json={"id": "DRFT_1"})
+        )
+        r = await route_tool(
+            tool_name="update_draft",
+            arguments={**_draft_args(token), "draft_id": "DRFT_1"},
+            client=client,
+            auth0_sub=SUB,
+            account_email=EMAIL,
+            settings=config_module.load(),
+        )
+    assert r["code"] == ToolErrorCode.NOT_FOUND
+    assert put_route.call_count == 0  # no update attempted
+    assert _consumable(token)  # slot NOT burned
+
+
+@pytest.mark.asyncio
 async def test_create_draft_oversize_build_does_not_burn_slot(client):
     # ~19.6 MiB raw renders over the 25 MiB cap; build rejects before the
     # draft POST and the slot survives for a corrected retry.

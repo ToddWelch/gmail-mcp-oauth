@@ -48,6 +48,7 @@ from fastapi.responses import JSONResponse, Response
 from . import attachment_upload_store as store
 from .crypto import encrypt_bytes
 from .db import session_scope
+from .gmail_tools.attachment_source import is_safe_filename
 
 logger = logging.getLogger(__name__)
 
@@ -124,7 +125,10 @@ async def upload_attachment(request: Request) -> Response:
     # is never used as a filesystem path.
     raw_filename = request.headers.get(_FILENAME_HEADER, "")
     filename = unquote(raw_filename).strip()
-    if not filename or len(filename) > 256:
+    # Reject control characters (CR/LF/NUL/...) BEFORE storing: they enable
+    # MIME-header injection and make EmailMessage.add_attachment raise at
+    # build time (a generic 500 instead of a typed rejection here).
+    if len(filename) > 256 or not is_safe_filename(filename):
         return _err(400, "missing_or_invalid_filename")
     mime_type = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
     if not mime_type or len(mime_type) > 128:

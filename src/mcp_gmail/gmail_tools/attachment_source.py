@@ -58,6 +58,17 @@ class _ConsumeRace(Exception):
     """A slot was consumed concurrently; roll the consume transaction back."""
 
 
+def is_safe_filename(name: str) -> bool:
+    """True if `name` is non-empty and free of C0/C1/DEL control characters.
+
+    EmailMessage.add_attachment raises ValueError on CR/LF in a filename,
+    and CR/LF/NUL enable MIME-header injection; reject them (and the rest
+    of the control range) before storing or building rather than crashing
+    at render time.
+    """
+    return bool(name) and not any(ord(c) < 0x20 or 0x7F <= ord(c) <= 0x9F for c in name)
+
+
 def _validate_attachments_pre_decode(attachments: list[Any]) -> dict[str, Any] | None:
     """Cheap pre-decode guard: count cap + a rounded-DOWN raw-size estimate
     over inline data_base64url, rejected before any decode allocates
@@ -102,6 +113,8 @@ def _decode_attachment(att: dict[str, Any], *, index: int) -> Attachment | dict[
     data_b64 = att.get("data_base64url")
     if not isinstance(filename, str) or not filename:
         return bad_request_error(f"attachments[{index}].filename is required")
+    if not is_safe_filename(filename):
+        return bad_request_error(f"attachments[{index}].filename contains control characters")
     if not isinstance(mime_type, str) or not mime_type:
         return bad_request_error(f"attachments[{index}].mime_type is required")
     if not isinstance(data_b64, str):
@@ -207,6 +220,9 @@ def load_attachments(
     decrypted: dict[int, bytes] = {}
     with session_scope() as session:
         for i in upload_indexes:
+            override = raw[i].get("filename")
+            if isinstance(override, str) and override and not is_safe_filename(override):
+                return bad_request_error(f"attachments[{i}].filename contains control characters")
             token_hash = store.hash_token(raw[i]["upload_token"])
             row = store.load_for_consume(
                 session,

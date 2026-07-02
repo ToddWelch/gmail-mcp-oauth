@@ -60,6 +60,17 @@ class _DraftsWriteMixin:
             body={"message": message_body},
         )
 
+    async def get_draft(self, *, draft_id: str) -> dict[str, Any]:
+        # Minimal existence check used by update_draft to rule out a
+        # stale/typo'd draft_id BEFORE consuming one-time upload slots.
+        # `format=minimal` returns the draft stub without the full body.
+        # Raises GmailApiError(404) when the draft does not exist.
+        draft_id = validate_gmail_id(draft_id, field="draft_id")
+        return await self._get(
+            f"/users/me/drafts/{draft_id}",
+            params={"format": "minimal"},
+        )
+
     async def update_draft(
         self,
         *,
