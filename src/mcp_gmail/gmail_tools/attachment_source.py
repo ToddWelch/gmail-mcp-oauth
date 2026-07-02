@@ -33,32 +33,47 @@ from .message_format import MAX_ENCODED_BYTES, Attachment
 # and the schema-layer maxItems on the attachments array.
 MAX_ATTACHMENT_COUNT = 25
 
-# Assembled-size estimation. Base64 inflates binary by 4/3, and the
-# RFC-5322 message adds envelope headers + per-part MIME framing. We
-# estimate the ENCODED size before consuming any slot so an oversize
-# reference set is rejected at reference time (slot NOT spent) rather
-# than after consume by build_email_message's OversizeMessage backstop.
+# Assembled-size estimation. Base64 inflates binary by 4/3 AND
+# EmailMessage.as_bytes() wraps it at 76 chars/line (RFC 2045), so the
+# wire size exceeds the bare 4/3. We UPPER-BOUND the encoded size before
+# consuming any slot so an oversize set is rejected at reference time
+# (slot NOT spent), not after consume by build_email_message's backstop.
 _MIME_OVERHEAD_BYTES = 8 * 1024  # envelope headers + boundaries margin
 _PER_ATTACHMENT_OVERHEAD = 512  # per-part Content-* headers + boundary
-
-# Effective single-attachment RAW cap advertised to callers: the largest
-# raw payload whose base64-expanded form (+ overhead) fits under Gmail's
-# 25 MiB encoded ceiling (~18.7 MiB). The upload endpoint keeps its own
-# 25 MiB streaming cap (store.MAX_UPLOAD_BYTES) as the memory/DoS bound.
-EFFECTIVE_MAX_ATTACHMENT_BYTES = (MAX_ENCODED_BYTES - _MIME_OVERHEAD_BYTES) * 3 // 4
+_B64_LINE_LEN = 76  # RFC 2045 base64 line width
 
 
-def _b64_encoded_len(raw_len: int) -> int:
-    """base64 length for raw_len bytes: ceil(raw_len / 3) * 4."""
-    return ((raw_len + 2) // 3) * 4
+def _b64_wire_len(raw_len: int) -> int:
+    """Upper bound on base64 wire bytes, including 76-char line-wrap separators."""
+    b64 = 4 * ((raw_len + 2) // 3)  # ceil(raw_len / 3) * 4
+    return b64 + b64 // _B64_LINE_LEN + 1  # >= one LF per wrapped line
 
 
 def _assembled_estimate(raw_lengths: list[int], *, body_len: int) -> int:
-    """Conservative estimate of the assembled encoded message size."""
+    """Upper bound on the assembled encoded message size (see module note)."""
     est = _MIME_OVERHEAD_BYTES + body_len
     for n in raw_lengths:
-        est += _b64_encoded_len(n) + _PER_ATTACHMENT_OVERHEAD
+        est += _b64_wire_len(n) + _PER_ATTACHMENT_OVERHEAD
     return est
+
+
+def _max_raw_under_cap() -> int:
+    """Largest single-attachment raw size whose estimate fits under the cap."""
+    lo, hi = 0, MAX_ENCODED_BYTES
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if _assembled_estimate([mid], body_len=0) <= MAX_ENCODED_BYTES:
+            lo = mid
+        else:
+            hi = mid - 1
+    return lo
+
+
+# Effective single-attachment RAW cap advertised to callers (~18.5 MiB),
+# derived from the corrected estimate so assembled(EFFECTIVE) <= 25 MiB
+# holds. The upload endpoint keeps its 25 MiB streaming cap
+# (store.MAX_UPLOAD_BYTES) as the memory/DoS bound.
+EFFECTIVE_MAX_ATTACHMENT_BYTES = _max_raw_under_cap()
 
 
 class _ConsumeRace(Exception):
@@ -66,18 +81,10 @@ class _ConsumeRace(Exception):
 
 
 def _validate_attachments_pre_decode(attachments: list[Any]) -> dict[str, Any] | None:
-    """cheap pre-decode checks. Returns error dict on failure or None.
-
-    Two cheap checks run before any base64 decoding:
-    1. Count cap: more than MAX_ATTACHMENT_COUNT attachments fails.
-    2. Estimated decoded size: each attachment's `data_base64url`
-       length / 4 * 3 approximates the decoded bytes. Sum across all
-       attachments and reject if the estimate exceeds MAX_ENCODED_BYTES.
-
-    The estimate is intentionally optimistic for the attacker (it
-    rounds DOWN: 4 base64 chars -> 3 raw bytes is the upper bound on
-    decoded size). A real send still runs the post-build OversizeMessage
-    check on the fully-rendered message, which catches the residual.
+    """Cheap pre-decode guard: count cap + a rounded-DOWN raw-size
+    estimate over inline data_base64url, rejected before any decode
+    allocates memory. The inflation-aware assembled-size check in
+    resolve_attachments is the accurate gate; this only fails fast.
     """
     if not isinstance(attachments, list):
         return bad_request_error("attachments must be a list")
@@ -104,17 +111,12 @@ def _validate_attachments_pre_decode(attachments: list[Any]) -> dict[str, Any] |
 
 
 def _decode_attachment(att: dict[str, Any], *, index: int) -> Attachment | dict[str, Any]:
-    """Convert an inline attachment input dict into an Attachment dataclass.
+    """Convert an inline attachment dict into an Attachment, or return a
+    bad_request_error dict on malformed input (caller checks the type).
 
-    Returns either the constructed Attachment or a bad_request_error
-    dict if the input was malformed. Caller must check the return type.
-
-    Input shape:
-        {"filename": "...", "mime_type": "...", "data_base64url": "..."}
-
-    `data_base64url` is base64url-encoded bytes (without padding is
-    accepted; we add padding before decoding) to match Gmail's `raw`
-    field convention, so download_attachment output can pass straight in.
+    Shape {filename, mime_type, data_base64url}; data_base64url is
+    base64url (padding optional; added before decode) to match Gmail's
+    `raw` convention, so download_attachment output passes straight in.
     """
     if not isinstance(att, dict):
         return bad_request_error(f"attachments[{index}] must be an object")

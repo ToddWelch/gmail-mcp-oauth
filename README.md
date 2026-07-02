@@ -220,8 +220,9 @@ or if the new key is in `PRIOR_ENCRYPTION_KEYS`.
   no SSRF/LFI surface); the send/draft tools reference
   `{source:"upload", upload_token}`. Single-use, 15-minute TTL,
   Fernet-encrypted at rest. The endpoint streams up to 25 MiB (DoS
-  bound), but the effective send-through limit is ~18.7 MiB raw (base64
-  inflation under Gmail's 25 MiB encoded cap); the mint response's
+  bound), but the effective send-through limit is ~18.5 MiB raw (base64
+  inflation incl. line-wrapping under Gmail's 25 MiB encoded cap); the
+  mint response's
   `max_bytes` advertises that figure, and an oversize reference set is
   rejected at reference time without spending the slot. See
   `docs/GMAIL_MCP_TOOLS.md`.

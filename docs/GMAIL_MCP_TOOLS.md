@@ -297,12 +297,13 @@ Guarantees and limits:
   account_email)` that minted it.
 - **TTL**: 15 minutes from mint (covers mint -> upload -> send).
 - **Size**: the upload endpoint streams up to 25 MiB (its memory/DoS
-  bound), but the effective send-through limit is ~18.7 MiB RAW because
-  base64 inflates the assembled message ~33% under Gmail's 25 MiB
-  encoded ceiling. The mint response's `max_bytes` advertises this
-  effective figure. An oversize reference set (across all attachments +
-  body) is rejected at REFERENCE time with a clear error, and the slot
-  is NOT consumed, so a corrected retry succeeds.
+  bound), but the effective send-through limit is ~18.5 MiB RAW because
+  base64 inflates the assembled message ~33% (plus RFC 2045 76-char
+  line-wrapping) under Gmail's 25 MiB encoded ceiling. The mint
+  response's `max_bytes` advertises this effective figure. An oversize
+  reference set (across all attachments + body) is rejected at REFERENCE
+  time with a clear error, and the slot is NOT consumed, so a corrected
+  retry succeeds.
 - **Caps**: 10 active slots and 100 MiB total per user.
 - **At rest**: uploaded bytes are Fernet-encrypted; they are deleted
   the instant the slot is consumed, and expired/consumed rows are

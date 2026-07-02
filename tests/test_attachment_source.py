@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import base64
 
+from email.message import EmailMessage
+
 import pytest
 
 from mcp_gmail import attachment_upload_store as store
@@ -20,8 +22,12 @@ from mcp_gmail.crypto import encrypt_bytes
 from mcp_gmail.db import Base
 from mcp_gmail.gmail_tools import attachment_source
 from mcp_gmail.gmail_tools._schema_validator import validate_arguments
-from mcp_gmail.gmail_tools.attachment_source import resolve_attachments
+from mcp_gmail.gmail_tools.attachment_source import (
+    EFFECTIVE_MAX_ATTACHMENT_BYTES,
+    resolve_attachments,
+)
 from mcp_gmail.gmail_tools.errors import ToolErrorCode
+from mcp_gmail.gmail_tools.message_format import MAX_ENCODED_BYTES
 
 SUB = "auth0|alice"
 EMAIL = "alice@example.com"
@@ -210,13 +216,26 @@ def test_resolve_replay_after_consume_rejected():
     assert replay["code"] == ToolErrorCode.BAD_REQUEST
 
 
-def test_resolve_rejects_base64_inflated_oversize_before_consume():
-    # 19 MiB RAW is under the 25 MiB streaming cap and would pass a
-    # raw-only check, but its base64-inflated assembled size (~25.3 MiB)
-    # exceeds Gmail's 25 MiB encoded ceiling. It must be rejected at
-    # resolve time WITHOUT consuming the slot, so a corrected retry can
-    # still succeed (the dead-zone fix). Stored size only; tiny ciphertext.
-    token = _upload_slot(b"x", size_override=19 * 1024 * 1024)
+def _asm(n: int) -> int:
+    """Real assembled size of a one-attachment message (CO's harness)."""
+    m = EmailMessage()
+    m["From"] = "s@e.com"
+    m["To"] = "r@e.com"
+    m["Subject"] = "s"
+    m.set_content("b")
+    m.add_attachment(b"\0" * n, maintype="application", subtype="pdf", filename="a.pdf")
+    return len(m.as_bytes())
+
+
+def test_resolve_rejects_dead_zone_oversize_before_consume():
+    # 19_600_000 RAW is INSIDE the old dead zone: under the 25 MiB
+    # streaming cap and it slipped past the buggy raw/no-line-wrap
+    # estimate, so it was decrypted + CONSUMED, then failed OversizeMessage
+    # after the slot was spent. asm(19_600_000) > 25 MiB, so it is a real
+    # oversize and must now be rejected at resolve WITHOUT spending the
+    # slot. Stored size only; tiny ciphertext.
+    assert _asm(19_600_000) > MAX_ENCODED_BYTES  # genuinely oversize
+    token = _upload_slot(b"x", size_override=19_600_000)
     result = resolve_attachments(
         raw=[{"source": "upload", "upload_token": token}],
         auth0_sub=SUB,
@@ -224,7 +243,7 @@ def test_resolve_rejects_base64_inflated_oversize_before_consume():
         encryption_key=_enc_key(),
     )
     assert result["code"] == ToolErrorCode.BAD_REQUEST
-    # Slot NOT spent: still consumable.
+    # Slot NOT spent: still consumable, so a corrected retry can succeed.
     with db_module.session_scope() as session:
         assert (
             store.load_for_consume(
@@ -232,6 +251,50 @@ def test_resolve_rejects_base64_inflated_oversize_before_consume():
             )
             is not None
         )
+
+
+def test_assembled_estimate_is_a_true_upper_bound():
+    # estimate([n]) must be >= the real rendered size for ALL n, including
+    # the dead-zone band and just below/at/above the advertised effective
+    # cap, so nothing that build_email_message would reject slips past the
+    # pre-consume guard.
+    for n in (
+        0,
+        1,
+        208 * 1024,
+        10_000_000,
+        19_405_000,
+        19_406_000,
+        19_600_000,
+        EFFECTIVE_MAX_ATTACHMENT_BYTES - 1,
+        EFFECTIVE_MAX_ATTACHMENT_BYTES,
+        EFFECTIVE_MAX_ATTACHMENT_BYTES + 1,
+        20_000_000,
+    ):
+        assert attachment_source._assembled_estimate([n], body_len=1) >= _asm(n), n
+
+
+def test_effective_cap_is_self_consistent_and_sendable():
+    # The advertised cap actually fits under the ceiling by the estimate
+    # AND by a real render, and the very next byte does not.
+    assert (
+        attachment_source._assembled_estimate([EFFECTIVE_MAX_ATTACHMENT_BYTES], body_len=0)
+        <= MAX_ENCODED_BYTES
+    )
+    assert (
+        attachment_source._assembled_estimate([EFFECTIVE_MAX_ATTACHMENT_BYTES + 1], body_len=0)
+        > MAX_ENCODED_BYTES
+    )
+    assert _asm(EFFECTIVE_MAX_ATTACHMENT_BYTES) <= MAX_ENCODED_BYTES
+    # A send at exactly the effective cap passes resolve (no oversize).
+    token = _upload_slot(b"x", size_override=EFFECTIVE_MAX_ATTACHMENT_BYTES)
+    result = resolve_attachments(
+        raw=[{"source": "upload", "upload_token": token}],
+        auth0_sub=SUB,
+        account_email=EMAIL,
+        encryption_key=_enc_key(),
+    )
+    assert isinstance(result, list)
 
 
 def test_resolve_size_cap_checked_before_decrypt(monkeypatch):
