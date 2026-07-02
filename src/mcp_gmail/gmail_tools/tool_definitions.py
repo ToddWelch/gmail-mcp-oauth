@@ -6,7 +6,7 @@ get_inbox_with_threads, modify_thread). Spliced from
 tool_definitions_labels_filters.py: 3 label and filter tools
 (list_email_labels, list_filters, get_filter). Split for the 300-LOC
 rule. gmail_tools/__init__.py concatenates this read manifest with
-the write, bootstrap, and extras manifests for the 32-tool surface.
+the write, bootstrap, and extras manifests for the 33-tool surface.
 
 Every Gmail-ID-shaped field carries a `pattern` matching
 gmail_id._VALIDATION_PATTERN ({1,256}). download_attachment.attachment_id

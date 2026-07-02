@@ -18,6 +18,7 @@ from urllib.parse import urlsplit
 
 from .. import attachment_upload_store as store
 from ..db import session_scope
+from .attachment_source import EFFECTIVE_MAX_ATTACHMENT_BYTES
 from .errors import bad_request_error
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -60,5 +61,10 @@ def create_upload_slot(
         "upload_token": token,
         "upload_url": _upload_url(settings),
         "expires_at": expires_at.isoformat(),
-        "max_bytes": store.MAX_UPLOAD_BYTES,
+        # Effective send-through cap (~18.7 MiB): raw bytes whose base64
+        # form fits under Gmail's 25 MiB encoded ceiling. The endpoint
+        # still accepts up to store.MAX_UPLOAD_BYTES (25 MiB) as its
+        # streaming memory bound, but a larger upload would be rejected at
+        # send time, so we advertise the figure that actually goes through.
+        "max_bytes": EFFECTIVE_MAX_ATTACHMENT_BYTES,
     }

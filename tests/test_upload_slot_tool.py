@@ -18,6 +18,7 @@ from mcp_gmail import db as db_module
 from mcp_gmail import token_manager
 from mcp_gmail.crypto import encrypt
 from mcp_gmail.db import Base
+from mcp_gmail.gmail_tools.attachment_source import EFFECTIVE_MAX_ATTACHMENT_BYTES
 from mcp_gmail.gmail_tools.dispatch import dispatch_tool_call
 from mcp_gmail.gmail_tools.errors import ToolErrorCode
 from mcp_gmail.token_store import GmailOAuthToken
@@ -89,7 +90,10 @@ async def test_send_link_mints_slot_descriptor():
         result = await _mint(settings)
     assert set(result) >= {"upload_token", "upload_url", "expires_at", "max_bytes"}
     assert result["upload_url"].endswith("/attachments/upload")
-    assert result["max_bytes"] == store.MAX_UPLOAD_BYTES
+    # Advertises the EFFECTIVE send-through cap (~18.7 MiB), not the
+    # 25 MiB streaming hard cap.
+    assert result["max_bytes"] == EFFECTIVE_MAX_ATTACHMENT_BYTES
+    assert result["max_bytes"] < store.MAX_UPLOAD_BYTES
     with db_module.session_scope() as session:
         assert store.count_active_slots(session, SUB) == 1
 

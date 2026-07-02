@@ -127,11 +127,7 @@ TOOL_SCOPE_REQUIREMENTS: dict[str, tuple[str, ...]] = {
     # Write tools.
     # ------------------------------------------------------------------
     # Sending and drafting
-    # create_attachment_upload_slot precedes a send/draft. Requiring
-    # SCOPE_SEND makes it "send-capable": SCOPE_HIERARCHY has COMPOSE and
-    # MODIFY (and FULL) subsume SEND, so a send-only, compose-only,
-    # modify, or full grant all satisfy it while a readonly-only link is
-    # correctly rejected scope_insufficient.
+    # create_attachment_upload_slot: SCOPE_SEND (send-capable; readonly-only rejected).
     "create_attachment_upload_slot": (SCOPE_SEND,),
     "send_email": (SCOPE_SEND,),
     "create_draft": (SCOPE_COMPOSE,),
@@ -177,10 +173,7 @@ TOOL_SCOPE_REQUIREMENTS: dict[str, tuple[str, ...]] = {
 
 
 # Total tool count: 33 (11 read + 15 write + 4 cleanup + 1 bootstrap + 2
-# fanout). The 15th write tool is create_attachment_upload_slot. Single
-# source of truth for the canonical-count assertion in __init__.py; tests
-# reference this so drift in the manifest, dispatch table, or count
-# assertion fails fast.
+# fanout). Single source of truth for the __init__.py count assertion.
 EXPECTED_TOOL_COUNT = 33
 
 

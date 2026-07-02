@@ -164,6 +164,7 @@ async def send_email(
         account_email=account_email,
         encryption_key=encryption_key,
         prior_encryption_keys=prior_encryption_keys,
+        body_len=len(body_text.encode("utf-8")),
     )
     if isinstance(resolved, dict):  # error dict
         return resolved

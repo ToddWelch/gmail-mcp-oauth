@@ -2,27 +2,18 @@
 
 Every attachment-accepting write tool (send_email, create_draft,
 update_draft, reply_all) accepts each attachment in exactly one of two
-shapes:
+shapes: inline ({filename, mime_type, data_base64url}) or upload-handle
+({source:"upload", upload_token, filename?, mime_type?}). The JSON
+Schema `oneOf` at the dispatch boundary is the primary discriminator;
+`_classify` here is the backstop for callers that bypass the schema.
 
-    inline:  {"filename", "mime_type", "data_base64url"}
-    upload:  {"source": "upload", "upload_token", "filename"?, "mime_type"?}
-
-The JSON Schema `oneOf` at the dispatch boundary (tool_schemas.
-ATTACHMENT_PROP) is the primary discriminator; `_classify` here is the
-defensive backstop for programmatic callers that bypass the schema.
-
-For an upload attachment this module loads the stored bytes for
-(auth0_sub, account_email, token), enforces the aggregate 25 MiB cap
-BEFORE decrypting anything, decrypts, and CONSUMES the slot (single-use,
-prompt byte deletion) atomically. Consuming happens before the caller's
-Gmail POST so two concurrent sends referencing the same slot cannot both
-deliver the attachment. If the Gmail POST later fails, the slot is spent
-and the caller must mint a fresh one; this trade buys airtight single-use.
-
-The inline decode helpers (`_decode_attachment`,
-`_validate_attachments_pre_decode`, `MAX_ATTACHMENT_COUNT`) live here as
-the single home for attachment-input handling; send.py re-exports
-`_decode_attachment` for backward compatibility.
+For an upload attachment this module loads the owner's stored bytes,
+runs the inflation-aware aggregate-size check BEFORE decrypting or
+consuming (so an oversize reference set is rejected without spending a
+slot), decrypts, and CONSUMES the slot atomically before the caller's
+Gmail POST (airtight single-use; a POST that fails after consume needs
+a fresh slot). Inline decode helpers live here too (single home);
+send.py re-exports `_decode_attachment` for backward compatibility.
 """
 
 from __future__ import annotations
@@ -41,6 +32,33 @@ from .message_format import MAX_ENCODED_BYTES, Attachment
 # Pre-decode attachment count cap. Matches the count Gmail's UI exposes
 # and the schema-layer maxItems on the attachments array.
 MAX_ATTACHMENT_COUNT = 25
+
+# Assembled-size estimation. Base64 inflates binary by 4/3, and the
+# RFC-5322 message adds envelope headers + per-part MIME framing. We
+# estimate the ENCODED size before consuming any slot so an oversize
+# reference set is rejected at reference time (slot NOT spent) rather
+# than after consume by build_email_message's OversizeMessage backstop.
+_MIME_OVERHEAD_BYTES = 8 * 1024  # envelope headers + boundaries margin
+_PER_ATTACHMENT_OVERHEAD = 512  # per-part Content-* headers + boundary
+
+# Effective single-attachment RAW cap advertised to callers: the largest
+# raw payload whose base64-expanded form (+ overhead) fits under Gmail's
+# 25 MiB encoded ceiling (~18.7 MiB). The upload endpoint keeps its own
+# 25 MiB streaming cap (store.MAX_UPLOAD_BYTES) as the memory/DoS bound.
+EFFECTIVE_MAX_ATTACHMENT_BYTES = (MAX_ENCODED_BYTES - _MIME_OVERHEAD_BYTES) * 3 // 4
+
+
+def _b64_encoded_len(raw_len: int) -> int:
+    """base64 length for raw_len bytes: ceil(raw_len / 3) * 4."""
+    return ((raw_len + 2) // 3) * 4
+
+
+def _assembled_estimate(raw_lengths: list[int], *, body_len: int) -> int:
+    """Conservative estimate of the assembled encoded message size."""
+    est = _MIME_OVERHEAD_BYTES + body_len
+    for n in raw_lengths:
+        est += _b64_encoded_len(n) + _PER_ATTACHMENT_OVERHEAD
+    return est
 
 
 class _ConsumeRace(Exception):
@@ -158,13 +176,17 @@ def resolve_attachments(
     account_email: str,
     encryption_key: str | None,
     prior_encryption_keys: tuple[str, ...] = (),
+    body_len: int = 0,
 ) -> list[Attachment] | dict[str, Any]:
     """Resolve a mixed inline/upload attachment list into Attachment objects.
 
     Returns the list (possibly empty) on success, or a bad_request_error
-    dict on any malformed / unavailable / oversize input. Upload slots
-    are consumed (single-use) only on the fully-successful path; any
-    failure rolls back so no slot is partially spent.
+    dict on any malformed / unavailable / oversize input. The oversize
+    check is inflation-aware (base64 4/3 + MIME overhead + `body_len`) and
+    runs BEFORE consuming any slot, so an oversize reference set is
+    rejected at reference time and a corrected retry can still succeed.
+    Upload slots are consumed (single-use) only on the fully-successful
+    path; any failure rolls back so no slot is partially spent.
     """
     if raw is None:
         return []
@@ -186,9 +208,10 @@ def resolve_attachments(
         kinds.append(kind)
 
     # Decode all inline attachments first (no DB, no consume) so an
-    # inline error never spends an upload slot.
+    # inline error never spends an upload slot. Collect each raw length
+    # for the inflation-aware assembled-size estimate below.
     out: list[Attachment | None] = [None] * len(raw)
-    inline_actual = 0
+    raw_lengths: list[int] = []
     for i, att in enumerate(raw):
         if kinds[i] != "inline":
             continue
@@ -196,25 +219,26 @@ def resolve_attachments(
         if isinstance(dec, dict):
             return dec
         out[i] = dec
-        inline_actual += len(dec.data)
-        if inline_actual > MAX_ENCODED_BYTES:
-            return bad_request_error(f"attachments exceed the {MAX_ENCODED_BYTES}-byte message cap")
+        raw_lengths.append(len(dec.data))
 
     upload_indexes = [i for i, k in enumerate(kinds) if k == "upload"]
     if not upload_indexes:
+        # Inline-only: inflation-aware assembled-size check (no consume).
+        if _assembled_estimate(raw_lengths, body_len=body_len) > MAX_ENCODED_BYTES:
+            return bad_request_error(f"attachments exceed the {MAX_ENCODED_BYTES}-byte message cap")
         return [a for a in out if a is not None]
 
     if not encryption_key:
         return bad_request_error("server is not configured to resolve upload attachments")
 
-    # Upload path: load owner-scoped rows, cap-check on stored sizes
-    # BEFORE decrypting (bounds transient plaintext to ~25 MiB), decrypt,
-    # then consume atomically.
+    # Upload path: load owner-scoped rows, run the inflation-aware size
+    # check on stored sizes BEFORE decrypting or consuming (so an oversize
+    # reference set is rejected without spending a slot and bounds
+    # transient plaintext), decrypt, then consume atomically.
     loaded: dict[int, tuple[str, bytes, str | None, str | None]] = {}
     decrypted: dict[int, bytes] = {}
     try:
         with session_scope() as session:
-            total = inline_actual
             for i in upload_indexes:
                 token = raw[i]["upload_token"]
                 token_hash = store.hash_token(token)
@@ -232,9 +256,10 @@ def resolve_attachments(
                         "create_attachment_upload_slot"
                     )
                 loaded[i] = (token_hash, row.encrypted_bytes, row.filename, row.mime_type)
-                total += row.size_bytes or 0
-            if total > MAX_ENCODED_BYTES:
-                # No decrypt has run: transient plaintext stays bounded.
+                raw_lengths.append(row.size_bytes or 0)
+            if _assembled_estimate(raw_lengths, body_len=body_len) > MAX_ENCODED_BYTES:
+                # No decrypt / consume has run: the slot is not spent, so a
+                # corrected retry can succeed.
                 return bad_request_error(
                     f"attachments exceed the {MAX_ENCODED_BYTES}-byte message cap"
                 )

@@ -219,7 +219,12 @@ or if the new key is in `PRIOR_ENCRYPTION_KEYS`.
   `POST /attachments/upload` (token in the `X-Upload-Token` header,
   no SSRF/LFI surface); the send/draft tools reference
   `{source:"upload", upload_token}`. Single-use, 15-minute TTL,
-  Fernet-encrypted at rest. See `docs/GMAIL_MCP_TOOLS.md`.
+  Fernet-encrypted at rest. The endpoint streams up to 25 MiB (DoS
+  bound), but the effective send-through limit is ~18.7 MiB raw (base64
+  inflation under Gmail's 25 MiB encoded cap); the mint response's
+  `max_bytes` advertises that figure, and an oversize reference set is
+  rejected at reference time without spending the slot. See
+  `docs/GMAIL_MCP_TOOLS.md`.
 - **OAuth scope expansion is opt-in, not default-on**. The default
   `GMAIL_OAUTH_SCOPES` is `openid email gmail.readonly`. Write
   tools surface `scope_insufficient` with a structured

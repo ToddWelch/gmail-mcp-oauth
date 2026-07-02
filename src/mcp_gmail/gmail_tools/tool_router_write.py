@@ -67,6 +67,8 @@ async def route_write_tool(
     """
     enc_key = settings.encryption_key if settings is not None else None
     prior_keys = settings.prior_encryption_keys if settings is not None else ()
+    _bt = arguments.get("body_text")
+    body_len = len(_bt.encode("utf-8")) if isinstance(_bt, str) else 0
 
     # ----- Attachment upload slot ------------------------------------------
     if tool_name == "create_attachment_upload_slot":
@@ -108,6 +110,7 @@ async def route_write_tool(
             account_email=account_email,
             encryption_key=enc_key,
             prior_encryption_keys=prior_keys,
+            body_len=body_len,
         )
         if isinstance(decoded, dict):
             return decoded
@@ -134,6 +137,7 @@ async def route_write_tool(
             account_email=account_email,
             encryption_key=enc_key,
             prior_encryption_keys=prior_keys,
+            body_len=body_len,
         )
         if isinstance(decoded, dict):
             return decoded

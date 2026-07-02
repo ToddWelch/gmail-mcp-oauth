@@ -210,6 +210,30 @@ def test_resolve_replay_after_consume_rejected():
     assert replay["code"] == ToolErrorCode.BAD_REQUEST
 
 
+def test_resolve_rejects_base64_inflated_oversize_before_consume():
+    # 19 MiB RAW is under the 25 MiB streaming cap and would pass a
+    # raw-only check, but its base64-inflated assembled size (~25.3 MiB)
+    # exceeds Gmail's 25 MiB encoded ceiling. It must be rejected at
+    # resolve time WITHOUT consuming the slot, so a corrected retry can
+    # still succeed (the dead-zone fix). Stored size only; tiny ciphertext.
+    token = _upload_slot(b"x", size_override=19 * 1024 * 1024)
+    result = resolve_attachments(
+        raw=[{"source": "upload", "upload_token": token}],
+        auth0_sub=SUB,
+        account_email=EMAIL,
+        encryption_key=_enc_key(),
+    )
+    assert result["code"] == ToolErrorCode.BAD_REQUEST
+    # Slot NOT spent: still consumable.
+    with db_module.session_scope() as session:
+        assert (
+            store.load_for_consume(
+                session, token_hash=store.hash_token(token), auth0_sub=SUB, account_email=EMAIL
+            )
+            is not None
+        )
+
+
 def test_resolve_size_cap_checked_before_decrypt(monkeypatch):
     # Slot claims 10 stored bytes; cap lowered to 5 so it is rejected.
     token = _upload_slot(b"tiny", size_override=10)

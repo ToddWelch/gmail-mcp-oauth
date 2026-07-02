@@ -11,7 +11,7 @@ The combined manifests export 33 tools, grouped for users as:
      get_or_create_label, create_filter_from_template)
   -  1 bootstrap tool (connect_gmail_account)
 
-The same 32 entries are split across five manifest files for
+The same 33 entries are split across six manifest files for
 file-size discipline:
   - `tool_definitions.py` hosts 8 message and thread read tools
     natively and splices in `tool_definitions_labels_filters.py`
@@ -22,8 +22,9 @@ file-size discipline:
   - `tool_definitions_extras.py` hosts the 2 fanout read tools
     (`multi_search_emails`, `batch_read_emails`).
   - `tool_definitions_write.py` hosts 19 entries (the 15 write tools
-    plus 4 cleanup tools), splicing in `tool_definitions_admin.py`
-    and `tool_definitions_admin_cleanup.py`.
+    plus 4 cleanup tools), splicing in `tool_definitions_upload.py`
+    (create_attachment_upload_slot), `tool_definitions_admin.py`, and
+    `tool_definitions_admin_cleanup.py`.
   - `tool_definitions_bootstrap.py` hosts the 1 bootstrap tool.
 
 This module concatenates them into the public TOOL_DEFINITIONS list
@@ -55,7 +56,7 @@ TOOL_DEFINITIONS: list = (
 
 
 # Tool-count assertion. EXPECTED_TOOL_COUNT lives in scope_check.py
-# (= 32). Drift in any of the four manifests or the count constant
+# (= 33). Drift in any of the manifests or the count constant
 # fails fast at import time.
 assert len(TOOL_DEFINITIONS) == EXPECTED_TOOL_COUNT, (
     f"TOOL_DEFINITIONS must be {EXPECTED_TOOL_COUNT} entries, got {len(TOOL_DEFINITIONS)}"
