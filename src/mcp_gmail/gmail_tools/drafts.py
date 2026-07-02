@@ -10,17 +10,15 @@ is a send operation). send_draft also surfaces a handler-level
 gmail.modify check for optional post-send actions; see send_draft.
 
 send_draft does NOT take an idempotency_key. The draft itself is the
-de-duplication anchor: callers wanting once-only delivery either
-hold the draft_id once or check list_drafts before re-calling.
-
-Each tool maps Gmail 404 -> not_found_error and lets other Gmail
-errors propagate to the dispatcher's error mapper.
+de-duplication anchor. Each tool maps Gmail 404 -> not_found_error and
+lets other Gmail errors propagate to the dispatcher's error mapper.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
+from .attachment_source import consume_slots
 from .drafts_post_send import apply_post_send_actions
 from .errors import bad_request_error, not_found_error
 from .gmail_client import GmailApiError, GmailClient
@@ -34,8 +32,6 @@ from .scope_check import SCOPE_MODIFY, granted_scope_satisfies
 
 
 # Helper: build the same shape send_email builds, without idempotency.
-# Drafts and sends share message construction but have different post-
-# build behaviors (cache vs upload to drafts collection).
 def _build_raw_message(
     *,
     sender: str,
@@ -84,21 +80,21 @@ async def create_draft(
     reply_to_message_id: str | None = None,
     reply_to_references: list[str] | None = None,
     thread_id: str | None = None,
+    auth0_sub: str = "",
+    account_email: str = "",
+    consume_token_hashes: list[str] | None = None,
 ) -> dict[str, Any]:
     """Create a Gmail draft from message-construction inputs.
 
-    The draft body is built via the same EmailMessage helper send_email
-    uses, so the 25 MiB cap and threading headers behave identically.
-    Returns Gmail's response, which has `id` (the draft id), `message`
-    (the underlying message stub), and standard timestamps.
+    Body built via the same EmailMessage helper send_email uses (25 MiB
+    cap + threading identical). Returns Gmail's response ({id, message,
+    timestamps}). optional `thread_id` sets `message.threadId` (the
+    authoritative thread join; header inference is the fallback), shape-
+    validated in `client.create_draft` via `gmail_id.validate_gmail_id`.
 
-    optional `thread_id` sets `message.threadId` on the request
-    body, the authoritative thread join per Gmail's threading docs.
-    Header inference via `reply_to_message_id` / `reply_to_references`
-    remains the fallback path Gmail uses when threadId is absent.
-    Validation of the ID shape happens in `client.create_draft` via
-    `gmail_id.validate_gmail_id` (defense-in-depth alongside the
-    schema-layer regex on `_THREAD_ID_PROP`).
+    Upload-slot attachments are pre-loaded by the router; their
+    `consume_token_hashes` are consumed AFTER a successful build and
+    BEFORE the Gmail POST, so an oversize draft never burns a slot.
     """
     raw = _build_raw_message(
         sender=sender,
@@ -111,8 +107,15 @@ async def create_draft(
         reply_to_message_id=reply_to_message_id,
         reply_to_references=reply_to_references,
     )
-    if isinstance(raw, dict):  # error dict
+    if isinstance(raw, dict):  # error dict (oversize) -> NO slot consumed
         return raw
+    consume_err = consume_slots(
+        token_hashes=consume_token_hashes or [],
+        auth0_sub=auth0_sub,
+        account_email=account_email,
+    )
+    if consume_err is not None:  # lost a race; do NOT create the draft
+        return consume_err
     return await client.create_draft(raw_message=raw, thread_id=thread_id)
 
 
@@ -135,20 +138,16 @@ async def update_draft(
     reply_to_message_id: str | None = None,
     reply_to_references: list[str] | None = None,
     thread_id: str | None = None,
+    auth0_sub: str = "",
+    account_email: str = "",
+    consume_token_hashes: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Replace an existing draft's contents.
-
-    Gmail's update_draft is a full PUT; the body wholly replaces the
-    prior draft. There is no partial-update path. Callers that want to
-    tweak one field have to re-supply every field they want preserved.
-
-    On 404 (draft no longer exists), returns not_found_error.
-
-    optional `thread_id` sets `message.threadId` on the request
-    body, the authoritative thread join per Gmail's threading docs.
-    Validation of the ID shape happens in `client.update_draft` via
-    `gmail_id.validate_gmail_id` (defense-in-depth alongside the
-    schema-layer regex on `_THREAD_ID_PROP`).
+    """Replace an existing draft's contents (full PUT; body wholly
+    replaces the prior draft, no partial-update path). On 404 returns
+    not_found_error. optional `thread_id` sets `message.threadId`, shape-
+    validated in `client.update_draft` via `gmail_id.validate_gmail_id`.
+    Upload-slot attachments are consumed AFTER a successful build and
+    BEFORE the Gmail PUT (an oversize draft never burns a slot).
     """
     raw = _build_raw_message(
         sender=sender,
@@ -161,8 +160,15 @@ async def update_draft(
         reply_to_message_id=reply_to_message_id,
         reply_to_references=reply_to_references,
     )
-    if isinstance(raw, dict):  # error dict
+    if isinstance(raw, dict):  # error dict (oversize) -> NO slot consumed
         return raw
+    consume_err = consume_slots(
+        token_hashes=consume_token_hashes or [],
+        auth0_sub=auth0_sub,
+        account_email=account_email,
+    )
+    if consume_err is not None:  # lost a race; do NOT update the draft
+        return consume_err
     try:
         return await client.update_draft(
             draft_id=draft_id,

@@ -40,7 +40,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .attachment_source import resolve_attachments
+from .attachment_source import consume_slots, load_attachments
 from .errors import bad_request_error
 from .gmail_client import GmailClient
 from .idempotency import IdempotencyCache, default_cache
@@ -114,18 +114,18 @@ async def send_email(
 
     Attachments accept two shapes per entry: inline
     ({filename, mime_type, data_base64url}) and upload-handle
-    ({source:"upload", upload_token}); resolution is delegated to
-    attachment_source.resolve_attachments, which decodes inline and
-    CONSUMES upload slots. `encryption_key` / `prior_encryption_keys`
-    are threaded through from Settings so upload bytes can be decrypted.
+    ({source:"upload", upload_token}). `attachment_source.load_attachments`
+    decodes inline and decrypts upload bytes (NO consume);
+    `encryption_key` / `prior_encryption_keys` are threaded from Settings
+    so upload bytes can be decrypted.
 
-    Ordering (single-use safety): the idempotency cache is READ before
-    any slot is consumed, so a cache HIT returns the cached result and
-    spends NO slot. On a MISS the slots are consumed BEFORE the single
-    POST so two concurrent sends with the same handle cannot both
-    deliver. If the POST then fails, the slots are already spent; the
-    caller must mint fresh slots before retrying (a dead-token retry
-    will not work).
+    Ordering (single-use safety): the idempotency cache is READ before any
+    load/consume, so a cache HIT returns the cached result and spends NO
+    slot. On a MISS the message is BUILT first (an oversize/malformed
+    build is rejected with NO slot consumed, so a corrected retry works),
+    then the slots are consumed BEFORE the single POST so two concurrent
+    sends with the same handle cannot both deliver. If the POST then
+    fails, the slots are already spent; mint fresh slots before retrying.
 
     Returns the Gmail send response on success (id + threadId). On bad
     input or oversize, returns a bad_request_error dict with no Gmail call.
@@ -157,19 +157,19 @@ async def send_email(
             # contract returns the same message ID for the TTL window.
             return cached
 
-    # ---- attachments (decode inline + consume upload slots) ---------------
-    resolved = resolve_attachments(
+    # ---- attachments: load + decrypt (NO consume yet) ---------------------
+    loaded = load_attachments(
         raw=attachments,
         auth0_sub=auth0_sub,
         account_email=account_email,
         encryption_key=encryption_key,
         prior_encryption_keys=prior_encryption_keys,
-        body_len=len(body_text.encode("utf-8")),
     )
-    if isinstance(resolved, dict):  # error dict
-        return resolved
+    if isinstance(loaded, dict):  # error dict
+        return loaded
+    resolved, token_hashes = loaded
 
-    # ---- build the message ------------------------------------------------
+    # ---- build the message (exact-size gate; oversize burns NO slot) ------
     try:
         msg = build_email_message(
             sender=sender,
@@ -184,6 +184,15 @@ async def send_email(
         )
     except OversizeMessage as exc:
         return bad_request_error(str(exc))
+
+    # ---- consume slots AFTER a successful build, BEFORE the POST ----------
+    consume_err = consume_slots(
+        token_hashes=token_hashes,
+        auth0_sub=auth0_sub,
+        account_email=account_email,
+    )
+    if consume_err is not None:  # lost a race; do NOT send
+        return consume_err
 
     # ---- send (exactly one POST) ------------------------------------------
     raw_b64 = message_to_base64url(msg)

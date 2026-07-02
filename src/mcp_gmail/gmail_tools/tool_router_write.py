@@ -20,7 +20,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from . import drafts, filters_write, labels_write, messages_write, reply, send, upload_slot
-from .attachment_source import resolve_attachments
+from .attachment_source import load_attachments
 from .gmail_client import GmailClient
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -62,13 +62,13 @@ async def route_write_tool(
 
     `settings` is forwarded so the create_attachment_upload_slot branch
     can build the upload URL and so the send/draft/reply branches can
-    thread the Fernet key(s) into attachment_source.resolve_attachments
-    to decrypt upload-slot bytes.
+    thread the Fernet key(s) into attachment_source.load_attachments to
+    decrypt upload-slot bytes. Draft branches load (decrypt) here and
+    hand the token_hashes to drafts.*, which consume AFTER a successful
+    build (an oversize draft never burns a slot).
     """
     enc_key = settings.encryption_key if settings is not None else None
     prior_keys = settings.prior_encryption_keys if settings is not None else ()
-    _bt = arguments.get("body_text")
-    body_len = len(_bt.encode("utf-8")) if isinstance(_bt, str) else 0
 
     # ----- Attachment upload slot ------------------------------------------
     if tool_name == "create_attachment_upload_slot":
@@ -104,16 +104,16 @@ async def route_write_tool(
         )
 
     if tool_name == "create_draft":
-        decoded = resolve_attachments(
+        loaded = load_attachments(
             raw=arguments.get("attachments"),
             auth0_sub=auth0_sub,
             account_email=account_email,
             encryption_key=enc_key,
             prior_encryption_keys=prior_keys,
-            body_len=body_len,
         )
-        if isinstance(decoded, dict):
-            return decoded
+        if isinstance(loaded, dict):
+            return loaded
+        atts, token_hashes = loaded
         return await drafts.create_draft(
             client=client,
             sender=require_str(arguments, "sender"),
@@ -122,25 +122,28 @@ async def route_write_tool(
             body_text=require_str(arguments, "body_text"),
             cc=optional_str_list(arguments, "cc"),
             bcc=optional_str_list(arguments, "bcc"),
-            attachments=decoded or None,
+            attachments=atts or None,
             reply_to_message_id=optional_str(arguments, "reply_to_message_id"),
             reply_to_references=optional_str_list(arguments, "reply_to_references"),
             # optional Gmail-API threadId. None when omitted so
             # the request body stays exactly the prior shape (back-compat).
             thread_id=optional_str(arguments, "thread_id"),
+            auth0_sub=auth0_sub,
+            account_email=account_email,
+            consume_token_hashes=token_hashes,
         )
 
     if tool_name == "update_draft":
-        decoded = resolve_attachments(
+        loaded = load_attachments(
             raw=arguments.get("attachments"),
             auth0_sub=auth0_sub,
             account_email=account_email,
             encryption_key=enc_key,
             prior_encryption_keys=prior_keys,
-            body_len=body_len,
         )
-        if isinstance(decoded, dict):
-            return decoded
+        if isinstance(loaded, dict):
+            return loaded
+        atts, token_hashes = loaded
         return await drafts.update_draft(
             client=client,
             draft_id=require_str(arguments, "draft_id"),
@@ -150,12 +153,15 @@ async def route_write_tool(
             body_text=require_str(arguments, "body_text"),
             cc=optional_str_list(arguments, "cc"),
             bcc=optional_str_list(arguments, "bcc"),
-            attachments=decoded or None,
+            attachments=atts or None,
             reply_to_message_id=optional_str(arguments, "reply_to_message_id"),
             reply_to_references=optional_str_list(arguments, "reply_to_references"),
             # optional Gmail-API threadId. None when omitted so
             # the request body stays exactly the prior shape (back-compat).
             thread_id=optional_str(arguments, "thread_id"),
+            auth0_sub=auth0_sub,
+            account_email=account_email,
+            consume_token_hashes=token_hashes,
         )
 
     if tool_name == "list_drafts":

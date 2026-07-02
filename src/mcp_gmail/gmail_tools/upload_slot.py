@@ -61,11 +61,12 @@ def create_upload_slot(
         "upload_token": token,
         "upload_url": _upload_url(settings),
         "expires_at": expires_at.isoformat(),
-        # Effective send-through cap (~18.5 MiB): raw bytes whose base64
-        # form (incl. RFC 2045 line-wrapping) fits under Gmail's 25 MiB
-        # encoded ceiling. The endpoint still accepts up to
-        # store.MAX_UPLOAD_BYTES (25 MiB) as its streaming memory bound,
-        # but a larger upload would be rejected at send time, so we
-        # advertise the figure that actually goes through.
+        # ADVISORY effective send-through cap (~18.5 MiB): raw bytes whose
+        # base64 form (incl. RFC 2045 line-wrapping) fits under Gmail's
+        # 25 MiB encoded ceiling, ignoring headers. Guidance only; the
+        # real gate is the assembled 25 MiB cap enforced at send/draft
+        # time on the exact rendered message (an oversize send is rejected
+        # without burning the slot). The endpoint still streams up to
+        # store.MAX_UPLOAD_BYTES (25 MiB) as its memory/DoS bound.
         "max_bytes": EFFECTIVE_MAX_ATTACHMENT_BYTES,
     }

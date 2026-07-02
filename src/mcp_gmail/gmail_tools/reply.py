@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .attachment_source import resolve_attachments
+from .attachment_source import consume_slots, load_attachments
 from .errors import bad_request_error, upstream_error
 from .gmail_client import GmailApiError, GmailClient
 from .idempotency import IdempotencyCache, default_cache
@@ -130,22 +130,11 @@ async def reply_all(
     (bad_request_error, not_found_error via the dispatcher's
     GmailApiError mapping, upstream_error on getProfile failure).
 
-    Recipient computation:
-      - From original `From`             -> reply To.
-      - From original `To` + `Cc`        -> reply Cc (minus self).
-      - Self resolved via getProfile.
-      - Expanded recipient set capped at _MAX_EXPANDED_RECIPIENTS
-        (100 by default).
-
-    Threading:
-      - Subject prefixed with "Re: " unless the original already
-        starts with "Re:" (case-insensitive). RFC 5322 does not
-        prescribe a strict canonical form; "Re: " is the convention
-        every major MUA uses.
-      - In-Reply-To set to original Message-ID.
-      - References set to original Message-ID (single-element chain
-        is the common case; if the original itself had a References
-        header we append; otherwise we use Message-ID as the chain).
+    Recipients: original `From` -> reply To; original `To` + `Cc` minus
+    self (resolved via getProfile) -> reply Cc; expanded set capped at
+    _MAX_EXPANDED_RECIPIENTS (100). Threading: Subject prefixed "Re: "
+    unless already present; In-Reply-To + References set to the original
+    Message-ID (appended to any existing References chain).
     """
     # ---- idempotency cache (READ side) ------------------------------------
     cache_obj = cache if cache is not None else default_cache
@@ -254,22 +243,22 @@ async def reply_all(
         else:
             refs_list = [message_id_header]
 
-    # ---- attachments (consume upload slots AFTER the reads succeed) --------
-    # Resolving here (not at the top) means a bad message_id or a
-    # getProfile failure does not spend an upload slot; the cache read at
-    # the top already short-circuited before any consume on a hit.
-    resolved = resolve_attachments(
+    # ---- attachments: load + decrypt AFTER the reads succeed (NO consume) --
+    # Loading here (not at the top) means a bad message_id or a getProfile
+    # failure does not touch a slot; the cache read at the top already
+    # short-circuited before any load/consume on a hit.
+    loaded = load_attachments(
         raw=attachments,
         auth0_sub=auth0_sub,
         account_email=account_email,
         encryption_key=encryption_key,
         prior_encryption_keys=prior_encryption_keys,
-        body_len=len(body_text.encode("utf-8")),
     )
-    if isinstance(resolved, dict):  # error dict
-        return resolved
+    if isinstance(loaded, dict):  # error dict
+        return loaded
+    resolved, token_hashes = loaded
 
-    # ---- build the message ------------------------------------------------
+    # ---- build the message (exact-size gate; oversize burns NO slot) ------
     try:
         msg = build_email_message(
             sender=self_email,
@@ -283,6 +272,15 @@ async def reply_all(
         )
     except OversizeMessage as exc:
         return bad_request_error(str(exc))
+
+    # ---- consume slots AFTER a successful build, BEFORE the POST ----------
+    consume_err = consume_slots(
+        token_hashes=token_hashes,
+        auth0_sub=auth0_sub,
+        account_email=account_email,
+    )
+    if consume_err is not None:  # lost a race; do NOT send
+        return consume_err
 
     # ---- send (exactly one POST) ------------------------------------------
     raw_b64 = message_to_base64url(msg)

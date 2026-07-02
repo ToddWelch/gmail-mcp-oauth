@@ -1,17 +1,18 @@
-"""Tests for attachment_source.resolve_attachments + the schema oneOf boundary.
+"""Tests for attachment_source.load_attachments / consume_slots + the schema.
 
-Covers the consume path end to end: the byte-for-byte integrity
-guarantee (the barcode-corruption fix), mixed inline+upload, ownership
-scoping, single-use, the pre-decrypt size cap (AMEND-B4), and the
-tagged-union discrimination both at the JSON Schema boundary
-(AMEND-B1) and in the _classify handler backstop.
+Consume-after-build: the oversize gate is the EXACT rendered
+build_email_message().as_bytes() size, not an estimate. These tests are
+non-vacuous - they build the real message and assert that an oversize
+set (from attachment size, RFC 2231 emoji filenames, a non-ASCII body,
+or large recipient/References headers) is rejected at build with the
+upload slots STILL consumable, while legitimate sends consume and work.
+Also covers byte-for-byte integrity, ownership scoping, single-use, the
+raw-sum decrypt-memory gate, and the oneOf discrimination.
 """
 
 from __future__ import annotations
 
 import base64
-
-from email.message import EmailMessage
 
 import pytest
 
@@ -24,10 +25,15 @@ from mcp_gmail.gmail_tools import attachment_source
 from mcp_gmail.gmail_tools._schema_validator import validate_arguments
 from mcp_gmail.gmail_tools.attachment_source import (
     EFFECTIVE_MAX_ATTACHMENT_BYTES,
-    resolve_attachments,
+    consume_slots,
+    load_attachments,
 )
 from mcp_gmail.gmail_tools.errors import ToolErrorCode
-from mcp_gmail.gmail_tools.message_format import MAX_ENCODED_BYTES
+from mcp_gmail.gmail_tools.message_format import (
+    MAX_ENCODED_BYTES,
+    OversizeMessage,
+    build_email_message,
+)
 
 SUB = "auth0|alice"
 EMAIL = "alice@example.com"
@@ -71,6 +77,53 @@ def _upload_slot(
     return token
 
 
+def _load(raw, *, sub: str = SUB, email: str = EMAIL, key: object = "default"):
+    return load_attachments(
+        raw=raw,
+        auth0_sub=sub,
+        account_email=email,
+        encryption_key=_enc_key() if key == "default" else key,
+        prior_encryption_keys=(),
+    )
+
+
+def _resolve(raw, *, sub: str = SUB, email: str = EMAIL, key: object = "default"):
+    """load + (if ok) consume; returns list[Attachment] or an error dict."""
+    loaded = _load(raw, sub=sub, email=email, key=key)
+    if isinstance(loaded, dict):
+        return loaded
+    atts, tokens = loaded
+    err = consume_slots(token_hashes=tokens, auth0_sub=sub, account_email=email)
+    return err if err is not None else atts
+
+
+def _attempt(atts, tokens, *, to=None, subject="s", body_text="b", cc=None) -> str:
+    """Mimic the handler: build (exact-size gate) then consume before POST."""
+    try:
+        build_email_message(
+            sender=EMAIL,
+            to=to or [EMAIL],
+            subject=subject,
+            body_text=body_text,
+            cc=cc,
+            attachments=atts or None,
+        )
+    except OversizeMessage:
+        return "oversize"  # NO consume ran
+    err = consume_slots(token_hashes=tokens, auth0_sub=SUB, account_email=EMAIL)
+    return "race" if err is not None else "sent"
+
+
+def _still_consumable(token: str) -> bool:
+    with db_module.session_scope() as session:
+        return (
+            store.load_for_consume(
+                session, token_hash=store.hash_token(token), auth0_sub=SUB, account_email=EMAIL
+            )
+            is not None
+        )
+
+
 def _base_send_args(attachments):
     return {
         "account_email": EMAIL,
@@ -82,7 +135,7 @@ def _base_send_args(attachments):
     }
 
 
-# --- schema boundary (AMEND-B1: oneOf enforced at dispatch) ----------------
+# --- schema boundary (oneOf enforced at dispatch) --------------------------
 
 
 def test_schema_boundary_accepts_each_branch():
@@ -105,235 +158,80 @@ def test_schema_boundary_rejects_both_and_neither_shapes():
     assert validate_arguments("send_email", _base_send_args([neither])) is not None
 
 
-# --- resolve_attachments ---------------------------------------------------
+# --- load + consume (non-oversize) -----------------------------------------
 
 
-def test_resolve_inline_only_needs_no_key():
+def test_inline_only_needs_no_key():
     data_b64 = base64.urlsafe_b64encode(b"hello").rstrip(b"=").decode()
-    result = resolve_attachments(
-        raw=[{"filename": "h.txt", "mime_type": "text/plain", "data_base64url": data_b64}],
-        auth0_sub=SUB,
-        account_email=EMAIL,
-        encryption_key=None,
+    result = _resolve(
+        [{"filename": "h.txt", "mime_type": "text/plain", "data_base64url": data_b64}], key=None
     )
     assert isinstance(result, list)
     assert result[0].data == b"hello"
 
 
-def test_resolve_upload_is_byte_for_byte_and_consumes():
+def test_upload_is_byte_for_byte_and_consumes():
     token = _upload_slot()
-    result = resolve_attachments(
-        raw=[{"source": "upload", "upload_token": token}],
-        auth0_sub=SUB,
-        account_email=EMAIL,
-        encryption_key=_enc_key(),
-    )
+    result = _resolve([{"source": "upload", "upload_token": token}])
     assert isinstance(result, list)
     assert result[0].data == PAYLOAD  # barcode guarantee
     assert result[0].filename == "label.pdf"
     assert result[0].mime_type == "application/pdf"
-    # Slot is consumed: replay fails and bytes are gone.
-    with db_module.session_scope() as session:
-        assert (
-            store.load_for_consume(
-                session, token_hash=store.hash_token(token), auth0_sub=SUB, account_email=EMAIL
-            )
-            is None
-        )
+    assert not _still_consumable(token)  # consumed
 
 
-def test_resolve_mixed_inline_and_upload_preserves_order():
+def test_mixed_inline_and_upload_preserves_order():
     token = _upload_slot(b"UPLOADED", filename="u.bin", mime="application/octet-stream")
     inline_b64 = base64.urlsafe_b64encode(b"INLINE").rstrip(b"=").decode()
-    result = resolve_attachments(
-        raw=[
+    result = _resolve(
+        [
             {"filename": "i.txt", "mime_type": "text/plain", "data_base64url": inline_b64},
             {"source": "upload", "upload_token": token},
-        ],
-        auth0_sub=SUB,
-        account_email=EMAIL,
-        encryption_key=_enc_key(),
+        ]
     )
     assert [a.data for a in result] == [b"INLINE", b"UPLOADED"]
 
 
-def test_resolve_filename_and_mime_override():
+def test_filename_and_mime_override():
     token = _upload_slot()
-    result = resolve_attachments(
-        raw=[{"source": "upload", "upload_token": token, "filename": "renamed.pdf"}],
-        auth0_sub=SUB,
-        account_email=EMAIL,
-        encryption_key=_enc_key(),
-    )
+    result = _resolve([{"source": "upload", "upload_token": token, "filename": "renamed.pdf"}])
     assert result[0].filename == "renamed.pdf"
 
 
-def test_resolve_wrong_user_rejected_and_slot_untouched():
+def test_wrong_user_rejected_and_slot_untouched():
     token = _upload_slot()  # owned by SUB
-    result = resolve_attachments(
-        raw=[{"source": "upload", "upload_token": token}],
-        auth0_sub="auth0|eve",
-        account_email=EMAIL,
-        encryption_key=_enc_key(),
-    )
+    result = _resolve([{"source": "upload", "upload_token": token}], sub="auth0|eve")
     assert result["code"] == ToolErrorCode.BAD_REQUEST
-    with db_module.session_scope() as session:
-        # The true owner's slot was NOT consumed.
-        assert (
-            store.load_for_consume(
-                session, token_hash=store.hash_token(token), auth0_sub=SUB, account_email=EMAIL
-            )
-            is not None
-        )
+    assert _still_consumable(token)  # true owner's slot not touched
 
 
-def test_resolve_expired_rejected():
+def test_expired_rejected():
+    from datetime import datetime, timedelta, timezone
+
     token = _upload_slot()
     with db_module.session_scope() as session:
-        row = store.find_slot(session, store.hash_token(token))
-        from datetime import datetime, timedelta, timezone
-
-        row.expires_at = datetime.now(timezone.utc) - timedelta(minutes=1)
-    result = resolve_attachments(
-        raw=[{"source": "upload", "upload_token": token}],
-        auth0_sub=SUB,
-        account_email=EMAIL,
-        encryption_key=_enc_key(),
-    )
+        store.find_slot(session, store.hash_token(token)).expires_at = datetime.now(
+            timezone.utc
+        ) - timedelta(minutes=1)
+    result = _resolve([{"source": "upload", "upload_token": token}])
     assert result["code"] == ToolErrorCode.BAD_REQUEST
 
 
-def test_resolve_replay_after_consume_rejected():
+def test_replay_after_consume_rejected():
     token = _upload_slot()
-    args = dict(
-        raw=[{"source": "upload", "upload_token": token}],
-        auth0_sub=SUB,
-        account_email=EMAIL,
-        encryption_key=_enc_key(),
-    )
-    assert isinstance(resolve_attachments(**args), list)
-    replay = resolve_attachments(**args)
-    assert replay["code"] == ToolErrorCode.BAD_REQUEST
-
-
-def _asm(n: int) -> int:
-    """Real assembled size of a one-attachment message (CO's harness)."""
-    m = EmailMessage()
-    m["From"] = "s@e.com"
-    m["To"] = "r@e.com"
-    m["Subject"] = "s"
-    m.set_content("b")
-    m.add_attachment(b"\0" * n, maintype="application", subtype="pdf", filename="a.pdf")
-    return len(m.as_bytes())
-
-
-def test_resolve_rejects_dead_zone_oversize_before_consume():
-    # 19_600_000 RAW is INSIDE the old dead zone: under the 25 MiB
-    # streaming cap and it slipped past the buggy raw/no-line-wrap
-    # estimate, so it was decrypted + CONSUMED, then failed OversizeMessage
-    # after the slot was spent. asm(19_600_000) > 25 MiB, so it is a real
-    # oversize and must now be rejected at resolve WITHOUT spending the
-    # slot. Stored size only; tiny ciphertext.
-    assert _asm(19_600_000) > MAX_ENCODED_BYTES  # genuinely oversize
-    token = _upload_slot(b"x", size_override=19_600_000)
-    result = resolve_attachments(
-        raw=[{"source": "upload", "upload_token": token}],
-        auth0_sub=SUB,
-        account_email=EMAIL,
-        encryption_key=_enc_key(),
-    )
-    assert result["code"] == ToolErrorCode.BAD_REQUEST
-    # Slot NOT spent: still consumable, so a corrected retry can succeed.
-    with db_module.session_scope() as session:
-        assert (
-            store.load_for_consume(
-                session, token_hash=store.hash_token(token), auth0_sub=SUB, account_email=EMAIL
-            )
-            is not None
-        )
-
-
-def test_assembled_estimate_is_a_true_upper_bound():
-    # estimate([n]) must be >= the real rendered size for ALL n, including
-    # the dead-zone band and just below/at/above the advertised effective
-    # cap, so nothing that build_email_message would reject slips past the
-    # pre-consume guard.
-    for n in (
-        0,
-        1,
-        208 * 1024,
-        10_000_000,
-        19_405_000,
-        19_406_000,
-        19_600_000,
-        EFFECTIVE_MAX_ATTACHMENT_BYTES - 1,
-        EFFECTIVE_MAX_ATTACHMENT_BYTES,
-        EFFECTIVE_MAX_ATTACHMENT_BYTES + 1,
-        20_000_000,
-    ):
-        assert attachment_source._assembled_estimate([n], body_len=1) >= _asm(n), n
-
-
-def test_effective_cap_is_self_consistent_and_sendable():
-    # The advertised cap actually fits under the ceiling by the estimate
-    # AND by a real render, and the very next byte does not.
+    assert isinstance(_resolve([{"source": "upload", "upload_token": token}]), list)
     assert (
-        attachment_source._assembled_estimate([EFFECTIVE_MAX_ATTACHMENT_BYTES], body_len=0)
-        <= MAX_ENCODED_BYTES
+        _resolve([{"source": "upload", "upload_token": token}])["code"] == ToolErrorCode.BAD_REQUEST
     )
-    assert (
-        attachment_source._assembled_estimate([EFFECTIVE_MAX_ATTACHMENT_BYTES + 1], body_len=0)
-        > MAX_ENCODED_BYTES
-    )
-    assert _asm(EFFECTIVE_MAX_ATTACHMENT_BYTES) <= MAX_ENCODED_BYTES
-    # A send at exactly the effective cap passes resolve (no oversize).
-    token = _upload_slot(b"x", size_override=EFFECTIVE_MAX_ATTACHMENT_BYTES)
-    result = resolve_attachments(
-        raw=[{"source": "upload", "upload_token": token}],
-        auth0_sub=SUB,
-        account_email=EMAIL,
-        encryption_key=_enc_key(),
-    )
-    assert isinstance(result, list)
 
 
-def test_resolve_size_cap_checked_before_decrypt(monkeypatch):
-    # Slot claims 10 stored bytes; cap lowered to 5 so it is rejected.
-    token = _upload_slot(b"tiny", size_override=10)
-    monkeypatch.setattr(attachment_source, "MAX_ENCODED_BYTES", 5)
-
-    def _boom(*_a, **_k):
-        raise AssertionError("decrypt_bytes must not be called before the size check")
-
-    monkeypatch.setattr(attachment_source, "decrypt_bytes", _boom)
-    result = resolve_attachments(
-        raw=[{"source": "upload", "upload_token": token}],
-        auth0_sub=SUB,
-        account_email=EMAIL,
-        encryption_key=_enc_key(),
-    )
-    assert result["code"] == ToolErrorCode.BAD_REQUEST
-
-
-def test_resolve_consume_race_rolls_back(monkeypatch):
+def test_consume_race_rolls_back(monkeypatch):
     token = _upload_slot()
     monkeypatch.setattr(store, "consume", lambda *a, **k: False)
-    result = resolve_attachments(
-        raw=[{"source": "upload", "upload_token": token}],
-        auth0_sub=SUB,
-        account_email=EMAIL,
-        encryption_key=_enc_key(),
-    )
+    result = _resolve([{"source": "upload", "upload_token": token}])
     assert result["code"] == ToolErrorCode.BAD_REQUEST
     monkeypatch.undo()
-    # The slot was not consumed (rollback), so it remains usable.
-    with db_module.session_scope() as session:
-        assert (
-            store.load_for_consume(
-                session, token_hash=store.hash_token(token), auth0_sub=SUB, account_email=EMAIL
-            )
-            is not None
-        )
+    assert _still_consumable(token)  # rolled back, still usable
 
 
 def test_classify_backstop_rejects_ambiguous_and_neither():
@@ -341,7 +239,86 @@ def test_classify_backstop_rejects_ambiguous_and_neither():
     neither = {"filename": "x"}
     assert isinstance(attachment_source._classify(both, index=0), dict)
     assert isinstance(attachment_source._classify(neither, index=0), dict)
-    assert (
-        attachment_source._classify({"source": "upload", "upload_token": "A" * 20}, index=0)
-        == "upload"
+    assert attachment_source._classify({"source": "upload", "upload_token": "A" * 20}, index=0) == (
+        "upload"
     )
+
+
+# --- oversize rejected at BUILD (exact render), slots intact ----------------
+
+
+def test_co_exploit_ten_emoji_parts_rejected_pre_consume_slots_intact():
+    # CO's exact exploit: 10 upload parts * 1,939,560 bytes with 256-code-
+    # point 4-byte (emoji) filenames. The raw sum (19.4 MiB) clears the
+    # memory gate so load succeeds, but RFC 2231 filename headers + base64
+    # push the assembled message over 25 MiB, so build raises and NO slot
+    # is consumed - all 10 survive for a corrected retry.
+    tokens = [_upload_slot(b"\0" * 1_939_560, filename="\U0001f600" * 256) for _ in range(10)]
+    loaded = _load([{"source": "upload", "upload_token": t} for t in tokens])
+    assert not isinstance(loaded, dict)  # memory gate passed; loaded ok
+    atts, hashes = loaded
+    assert _attempt(atts, hashes) == "oversize"
+    for t in tokens:
+        assert _still_consumable(t)
+
+
+def test_single_attachment_over_boundary_rejected_slot_intact():
+    # ~19.6 MiB raw is under the 25 MiB memory gate but its base64 render
+    # exceeds Gmail's 25 MiB encoded ceiling: rejected at build, slot intact.
+    token = _upload_slot(b"\0" * 19_600_000)
+    atts, hashes = _load([{"source": "upload", "upload_token": token}])
+    assert _attempt(atts, hashes) == "oversize"
+    assert _still_consumable(token)
+
+
+def test_single_attachment_near_boundary_send_succeeds_and_consumes():
+    # ~18 MiB raw renders under the cap: a legitimate large send works and
+    # the slot is consumed (the cap does not over-reject).
+    token = _upload_slot(b"\0" * 18_000_000)
+    atts, hashes = _load([{"source": "upload", "upload_token": token}])
+    assert _attempt(atts, hashes) == "sent"
+    assert not _still_consumable(token)
+
+
+def test_large_recipient_header_oversize_rejected_slot_intact():
+    # A single enormous recipient string (schema places NO maxLength on
+    # list items) makes the To header ~30 MiB - invisible to any estimate
+    # from resolve's vantage point, but build sees it and rejects; the
+    # tiny slot is not consumed.
+    token = _upload_slot(b"x")
+    atts, hashes = _load([{"source": "upload", "upload_token": token}])
+    huge_to = ["u" * 30_000_000 + "@e.com"]
+    assert _attempt(atts, hashes, to=huge_to) == "oversize"
+    assert _still_consumable(token)
+
+
+def test_non_ascii_body_oversize_rejected_slot_intact():
+    # A non-ASCII body renders quoted-printable/base64 and inflates far
+    # past its raw UTF-8 length; with a tiny slot it still tips the message
+    # over the cap at build, and the slot survives.
+    token = _upload_slot(b"x")
+    atts, hashes = _load([{"source": "upload", "upload_token": token}])
+    body = "の" * 9_000_000  # 9M 3-byte chars = 27 MB UTF-8, over the cap
+    assert _attempt(atts, hashes, body_text=body) == "oversize"
+    assert _still_consumable(token)
+
+
+def test_raw_sum_memory_gate_rejects_before_decrypt(monkeypatch):
+    # A reference set whose stored raw sizes exceed 25 MiB is rejected in
+    # load_attachments BEFORE any decrypt, so RAM stays bounded. Stored
+    # size only; actual ciphertext is tiny.
+    token = _upload_slot(b"x", size_override=MAX_ENCODED_BYTES + 1)
+
+    def _boom(*_a, **_k):
+        raise AssertionError("decrypt_bytes must not run past the memory gate")
+
+    monkeypatch.setattr(attachment_source, "decrypt_bytes", _boom)
+    result = _load([{"source": "upload", "upload_token": token}])
+    assert result["code"] == ToolErrorCode.BAD_REQUEST
+    monkeypatch.undo()
+    assert _still_consumable(token)  # gate rejects without consuming
+
+
+def test_advisory_effective_cap_is_below_the_hard_caps():
+    assert EFFECTIVE_MAX_ATTACHMENT_BYTES < MAX_ENCODED_BYTES
+    assert EFFECTIVE_MAX_ATTACHMENT_BYTES < store.MAX_UPLOAD_BYTES
