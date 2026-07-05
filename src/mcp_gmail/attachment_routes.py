@@ -48,7 +48,7 @@ from fastapi.responses import JSONResponse, Response
 from . import attachment_upload_store as store
 from .crypto import encrypt_bytes
 from .db import session_scope
-from .gmail_tools.attachment_source import is_safe_filename
+from .gmail_tools.attachment_source import is_safe_filename, is_safe_mime
 
 logger = logging.getLogger(__name__)
 
@@ -131,6 +131,13 @@ async def upload_attachment(request: Request) -> Response:
     if len(filename) > 256 or not is_safe_filename(filename):
         return _err(400, "missing_or_invalid_filename")
     mime_type = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
+    # Reject control characters (CR/LF/NUL/...) in the mime BEFORE storing:
+    # like a control-char filename they enable MIME-header injection and make
+    # EmailMessage.add_attachment raise at build time (a generic 500 instead of
+    # a typed rejection here). An absent/empty mime defaults to octet-stream
+    # (unchanged); a present-but-unsafe mime is a 400 with nothing stored.
+    if mime_type and not is_safe_mime(mime_type):
+        return _err(400, "invalid_content_type")
     if not mime_type or len(mime_type) > 128:
         mime_type = "application/octet-stream"
 

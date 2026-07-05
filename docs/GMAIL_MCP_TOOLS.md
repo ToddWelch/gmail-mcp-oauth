@@ -308,6 +308,17 @@ Guarantees and limits:
 - **At rest**: uploaded bytes are Fernet-encrypted; they are deleted
   the instant the slot is consumed, and expired/consumed rows are
   purged at startup and hourly.
+- **One handle per message**: referencing the same `upload_token` twice
+  in one message's attachments is rejected with a `bad_request` (each
+  handle is single-use) before any load/consume; upload the file again
+  to attach a second copy.
+- **Header safety**: control characters (CR/LF/NUL and DEL/C1) in a
+  filename or mime/`Content-Type` are rejected before storing (upload
+  endpoint -> 400 `invalid_content_type` / `missing_or_invalid_filename`,
+  nothing stored) and before build (reference time -> `bad_request`). Any
+  malformed header/attachment value that still reaches message assembly
+  maps to a typed `bad_request` ("message could not be built ..."), never
+  a raw 500, and no slot is consumed.
 
 ## Idempotency cache (used by send_email)
 

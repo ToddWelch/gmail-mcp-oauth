@@ -5,7 +5,14 @@ update_draft, reply_all) accepts each attachment in exactly one of two
 shapes: inline ({filename, mime_type, data_base64url}) or upload-handle
 ({source:"upload", upload_token, filename?, mime_type?}). The JSON
 Schema `oneOf` at the dispatch boundary is the primary discriminator;
-`_classify` here is the backstop for callers that bypass the schema.
+`_classify` (in attachment_input) is the backstop for callers that
+bypass the schema.
+
+Input-shape validation, inline decode, and control-char rejection live
+in attachment_input.py (pure, DB-free); this module owns the DB-backed
+half: loading/decrypting upload slots and consuming them. It re-exports
+the input helpers so `attachment_source.is_safe_filename` /
+`send._decode_attachment` and friends keep resolving.
 
 Consume-after-build
 -------------------
@@ -31,20 +38,22 @@ send.py re-exports `_decode_attachment` for backward compatibility.
 
 from __future__ import annotations
 
-import base64
-import binascii
 from typing import Any
 
 from .. import attachment_upload_store as store
 from ..crypto import CryptoError, decrypt_bytes
 from ..db import session_scope
+from .attachment_input import (
+    MAX_ATTACHMENT_COUNT,  # noqa: F401  re-exported for send.py back-compat
+    _classify,
+    _decode_attachment,
+    _validate_attachments_pre_decode,
+    is_safe_filename,
+    is_safe_mime,
+)
 from .errors import bad_request_error
 from .message_format import MAX_ENCODED_BYTES, Attachment
 
-
-# Pre-decode attachment count cap. Matches the count Gmail's UI exposes
-# and the schema-layer maxItems on the attachments array.
-MAX_ATTACHMENT_COUNT = 25
 
 # ADVISORY single-attachment raw cap surfaced in the mint response's
 # `max_bytes` (~18.5 MiB): base64 4/3 expansion plus RFC 2045 76-char
@@ -56,109 +65,6 @@ EFFECTIVE_MAX_ATTACHMENT_BYTES = MAX_ENCODED_BYTES * 3 // 4 * 76 // 77
 
 class _ConsumeRace(Exception):
     """A slot was consumed concurrently; roll the consume transaction back."""
-
-
-def is_safe_filename(name: str) -> bool:
-    """True if `name` is non-empty and free of C0/C1/DEL control characters.
-
-    EmailMessage.add_attachment raises ValueError on CR/LF in a filename,
-    and CR/LF/NUL enable MIME-header injection; reject them (and the rest
-    of the control range) before storing or building rather than crashing
-    at render time.
-    """
-    return bool(name) and not any(ord(c) < 0x20 or 0x7F <= ord(c) <= 0x9F for c in name)
-
-
-def _validate_attachments_pre_decode(attachments: list[Any]) -> dict[str, Any] | None:
-    """Cheap pre-decode guard: count cap + a rounded-DOWN raw-size estimate
-    over inline data_base64url, rejected before any decode allocates
-    memory. Not the oversize gate (build_email_message is); fails fast.
-    """
-    if not isinstance(attachments, list):
-        return bad_request_error("attachments must be a list")
-    if len(attachments) > MAX_ATTACHMENT_COUNT:
-        return bad_request_error(
-            f"too many attachments: {len(attachments)} > {MAX_ATTACHMENT_COUNT}"
-        )
-    estimated_total = 0
-    for i, att in enumerate(attachments):
-        if not isinstance(att, dict):
-            # Detailed validation runs in _decode_attachment; here we
-            # only fail-fast on the size estimate. Skip non-dicts so
-            # _decode_attachment returns the appropriate per-field error.
-            continue
-        b64 = att.get("data_base64url")
-        if isinstance(b64, str):
-            estimated_total += (len(b64) // 4) * 3
-            if estimated_total > MAX_ENCODED_BYTES:
-                return bad_request_error(
-                    f"attachments[{i}] pushes estimated size over the "
-                    f"{MAX_ENCODED_BYTES}-byte cap before decode"
-                )
-    return None
-
-
-def _decode_attachment(att: dict[str, Any], *, index: int) -> Attachment | dict[str, Any]:
-    """Convert an inline attachment dict into an Attachment, or return a
-    bad_request_error dict on malformed input (caller checks the type).
-
-    Shape {filename, mime_type, data_base64url}; data_base64url is
-    base64url (padding optional; added before decode) to match Gmail's
-    `raw` convention, so download_attachment output passes straight in.
-    """
-    if not isinstance(att, dict):
-        return bad_request_error(f"attachments[{index}] must be an object")
-    filename = att.get("filename")
-    mime_type = att.get("mime_type")
-    data_b64 = att.get("data_base64url")
-    if not isinstance(filename, str) or not filename:
-        return bad_request_error(f"attachments[{index}].filename is required")
-    if not is_safe_filename(filename):
-        return bad_request_error(f"attachments[{index}].filename contains control characters")
-    if not isinstance(mime_type, str) or not mime_type:
-        return bad_request_error(f"attachments[{index}].mime_type is required")
-    if not isinstance(data_b64, str):
-        return bad_request_error(f"attachments[{index}].data_base64url must be a string")
-    # Add padding then decode. urlsafe_b64decode requires padding.
-    padded = data_b64 + "=" * (-len(data_b64) % 4)
-    try:
-        raw = base64.urlsafe_b64decode(padded)
-    except (binascii.Error, ValueError):
-        return bad_request_error(f"attachments[{index}].data_base64url is not valid base64url")
-    return Attachment(filename=filename, mime_type=mime_type, data=raw)
-
-
-def _classify(att: Any, *, index: int) -> str | dict[str, Any]:
-    """Return "inline" | "upload", or a bad_request_error dict.
-
-    Mirrors download_attachment's exactly-one-selector discipline:
-    exactly one of the inline shape (data_base64url) or the upload shape
-    (source=upload + upload_token) must be present.
-    """
-    if not isinstance(att, dict):
-        return bad_request_error(f"attachments[{index}] must be an object")
-    has_inline = "data_base64url" in att
-    has_upload = att.get("source") == "upload" or "upload_token" in att
-    if has_inline and has_upload:
-        return bad_request_error(
-            f"attachments[{index}] must have exactly one of data_base64url "
-            "(inline) or source=upload (handle), not both"
-        )
-    if not has_inline and not has_upload:
-        return bad_request_error(
-            f"attachments[{index}] must have either data_base64url (inline) "
-            "or source=upload with upload_token"
-        )
-    if has_upload:
-        if att.get("source") != "upload":
-            return bad_request_error(f"attachments[{index}].source must be 'upload'")
-        token = att.get("upload_token")
-        if not isinstance(token, str) or not token:
-            return bad_request_error(
-                f"attachments[{index}].upload_token is required for source=upload"
-            )
-        return "upload"
-    return "inline"
 
 
 def load_attachments(
@@ -197,6 +103,26 @@ def load_attachments(
             return kind
         kinds.append(kind)
 
+    # Reject the SAME upload_token referenced twice in one message BEFORE
+    # any load/decrypt/consume. Otherwise both references pass load+build,
+    # then consume_slots consumes that one row twice in a single txn: the
+    # 2nd conditional UPDATE sees consumed_at and raises the concurrent-
+    # consume error, rejecting a valid-looking request with a confusing
+    # race (the txn rolls back, so the slot is not burned, but the caller
+    # gets a misleading message). Each upload handle is single-use.
+    seen_tokens: set[str] = set()
+    for i, kind in enumerate(kinds):
+        if kind != "upload":
+            continue
+        token = raw[i]["upload_token"]
+        if token in seen_tokens:
+            return bad_request_error(
+                f"attachments[{i}].upload_token is referenced more than once in this "
+                "message; each upload handle is single-use, so upload the file again "
+                "to attach a second copy"
+            )
+        seen_tokens.add(token)
+
     # Decode inline first (no DB); collect raw sizes for the memory gate.
     out: list[Attachment | None] = [None] * len(raw)
     raw_total = 0
@@ -223,6 +149,9 @@ def load_attachments(
             override = raw[i].get("filename")
             if isinstance(override, str) and override and not is_safe_filename(override):
                 return bad_request_error(f"attachments[{i}].filename contains control characters")
+            mime_override = raw[i].get("mime_type")
+            if isinstance(mime_override, str) and mime_override and not is_safe_mime(mime_override):
+                return bad_request_error(f"attachments[{i}].mime_type contains control characters")
             token_hash = store.hash_token(raw[i]["upload_token"])
             row = store.load_for_consume(
                 session,

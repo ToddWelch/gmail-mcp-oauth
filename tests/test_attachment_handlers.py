@@ -254,3 +254,65 @@ async def test_create_draft_oversize_build_does_not_burn_slot(client):
     assert route.call_count == 0  # oversize -> no draft POST
     assert r["code"] == ToolErrorCode.BAD_REQUEST
     assert _consumable(token)  # slot not burned
+
+
+# ---------------------------------------------------------------------------
+# FIX-C: malformed header value at build -> typed bad_request, never a 500
+# ---------------------------------------------------------------------------
+
+_BUILD_ERR_MSG = "message could not be built from the provided headers/attachments"
+# CR/LF in reply_to_references slips past the attachment proactive checks
+# (they guard filename/mime, not references) and makes build_email_message
+# raise ValueError.
+_BAD_REFS = ["ref\r\nX-Injected: y"]
+
+
+@pytest.mark.asyncio
+async def test_send_email_malformed_header_maps_to_bad_request_no_consume(client):
+    # FIX-C: the ValueError from build is mapped to a typed bad_request BEFORE
+    # consume, so no POST is made and the slot is not burned (not a raw 500).
+    token = _upload_slot(b"PDFBYTES")
+    with respx.mock(base_url=GMAIL_API_BASE, assert_all_called=False) as router:
+        route = router.post("/users/me/messages/send").mock(
+            return_value=httpx.Response(200, json={"id": "s1"})
+        )
+        r = await send.send_email(
+            client=client,
+            auth0_sub=SUB,
+            account_email=EMAIL,
+            sender=EMAIL,
+            to=["you@example.com"],
+            subject="hi",
+            body_text="b",
+            attachments=[_upload_att(token)],
+            reply_to_message_id="m1",
+            reply_to_references=_BAD_REFS,
+            encryption_key=_key(),
+        )
+    assert route.call_count == 0  # build failed -> NO send
+    assert r["code"] == ToolErrorCode.BAD_REQUEST
+    assert r["message"] == _BUILD_ERR_MSG  # the FIX-C path (not oversize/other)
+    assert _consumable(token)  # slot NOT burned
+
+
+@pytest.mark.asyncio
+async def test_create_draft_malformed_header_maps_to_bad_request_no_consume(client):
+    # FIX-C via the shared _build_raw_message (also covers update_draft's site).
+    token = _upload_slot(b"PDFBYTES")
+    args = {**_draft_args(token), "reply_to_message_id": "m1", "reply_to_references": _BAD_REFS}
+    with respx.mock(base_url=GMAIL_API_BASE, assert_all_called=False) as router:
+        route = router.post("/users/me/drafts").mock(
+            return_value=httpx.Response(200, json={"id": "d1"})
+        )
+        r = await route_tool(
+            tool_name="create_draft",
+            arguments=args,
+            client=client,
+            auth0_sub=SUB,
+            account_email=EMAIL,
+            settings=config_module.load(),
+        )
+    assert route.call_count == 0  # build failed -> NO draft POST
+    assert r["code"] == ToolErrorCode.BAD_REQUEST
+    assert r["message"] == _BUILD_ERR_MSG
+    assert _consumable(token)  # slot NOT burned

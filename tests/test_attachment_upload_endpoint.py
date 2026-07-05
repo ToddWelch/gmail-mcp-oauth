@@ -184,6 +184,42 @@ def test_control_char_filename_rejected_400_nothing_stored(client):
         assert store.find_slot(session, store.hash_token(token)).uploaded_at is None
 
 
+def test_control_char_content_type_rejected_400_nothing_stored(client):
+    # A CR/LF-bearing Content-Type would inject MIME headers / crash
+    # add_attachment at build time. Reject it at the endpoint via is_safe_mime
+    # with 400 and store nothing. is_safe_mime covers the whole control range
+    # (< 0x20 incl. CR/LF/NUL, and DEL/C1 0x7F..0x9F).
+    token = _mint()
+    r = client.post(
+        UPLOAD,
+        content=b"data",
+        headers={
+            "X-Upload-Token": token,
+            "Content-Type": "application/pdf\r\nX-Injected: y",
+            "X-Attachment-Filename": "label.pdf",
+        },
+    )
+    assert r.status_code == 400
+    assert r.json()["error"] == "invalid_content_type"
+    with db_module.session_scope() as session:
+        assert store.find_slot(session, store.hash_token(token)).uploaded_at is None
+
+
+def test_del_control_char_content_type_rejected_400(client):
+    # DEL (0x7f) is a control char a well-behaved client can still transmit;
+    # the endpoint rejects it too (defense in depth beyond CR/LF).
+    token = _mint()
+    r = client.post(
+        UPLOAD,
+        content=b"data",
+        headers=_hdrs(token, mime="application/pdf\x7f"),
+    )
+    assert r.status_code == 400
+    assert r.json()["error"] == "invalid_content_type"
+    with db_module.session_scope() as session:
+        assert store.find_slot(session, store.hash_token(token)).uploaded_at is None
+
+
 def test_upload_happy_path_stores_encrypted(client):
     token = _mint()
     payload = bytes(range(256)) * 4  # 1 KiB, high-bit bytes

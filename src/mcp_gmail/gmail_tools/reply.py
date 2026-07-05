@@ -21,6 +21,7 @@ slot is consumed, so a cache hit consumes no slot.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from .attachment_source import consume_slots, load_attachments
@@ -32,6 +33,8 @@ from .message_format import (
     build_email_message,
     message_to_base64url,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # Hard cap mirrored from tool_schemas.EMAIL_LIST_PROP.maxItems. We
@@ -272,6 +275,10 @@ async def reply_all(
         )
     except OversizeMessage as exc:
         return bad_request_error(str(exc))
+    except ValueError:
+        # Malformed header/attachment value raises in EmailMessage; bad_request, no consume.
+        logger.warning("reply_all message build rejected a malformed header/attachment value")
+        return bad_request_error("message could not be built from the provided headers/attachments")
 
     # ---- consume slots AFTER a successful build, BEFORE the POST ----------
     consume_err = consume_slots(

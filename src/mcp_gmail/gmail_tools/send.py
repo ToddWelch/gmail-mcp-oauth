@@ -38,6 +38,7 @@ addresses).
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from .attachment_source import consume_slots, load_attachments
@@ -59,6 +60,8 @@ from .attachment_source import (  # noqa: F401
     _decode_attachment,
     _validate_attachments_pre_decode,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # Minimum syntactic check: localpart@domain with at least 1 char each.
@@ -184,6 +187,14 @@ async def send_email(
         )
     except OversizeMessage as exc:
         return bad_request_error(str(exc))
+    except ValueError:
+        # A malformed caller-supplied header/attachment value (e.g. CR/LF in
+        # a filename or mime_type that slipped past proactive checks) makes
+        # EmailMessage raise ValueError. Map to a typed bad_request; scoped to
+        # the build so it stays BEFORE consume (no slot burned) and cannot mask
+        # unrelated errors. Never log recipients/filename/bytes.
+        logger.warning("send_email message build rejected a malformed header/attachment value")
+        return bad_request_error("message could not be built from the provided headers/attachments")
 
     # ---- consume slots AFTER a successful build, BEFORE the POST ----------
     consume_err = consume_slots(

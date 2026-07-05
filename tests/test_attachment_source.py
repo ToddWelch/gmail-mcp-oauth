@@ -257,6 +257,57 @@ def test_upload_override_filename_with_control_char_rejected_slot_intact():
     assert _still_consumable(token)  # rejected before consume
 
 
+# --- FIX-A: duplicate upload handle in one message -------------------------
+
+
+def test_duplicate_upload_token_rejected_nothing_consumed():
+    # Referencing the SAME upload_token twice would pass load+build then make
+    # consume_slots consume one row twice in a single txn (2nd conditional
+    # UPDATE sees consumed_at -> misleading concurrent-consume error). Reject
+    # clearly BEFORE any load/decrypt/consume; the slot stays consumable.
+    token = _upload_slot()
+    result = _resolve(
+        [
+            {"source": "upload", "upload_token": token},
+            {"source": "upload", "upload_token": token},
+        ]
+    )
+    assert result["code"] == ToolErrorCode.BAD_REQUEST
+    assert "more than once" in result["message"]
+    assert "attachments[1]" in result["message"]  # names the duplicate entry
+    assert _still_consumable(token)  # nothing consumed; single-use handle intact
+
+
+# --- FIX-B: control-char mime_type rejected (mirrors the filename fix) ------
+
+
+def test_is_safe_mime():
+    assert attachment_source.is_safe_mime("application/pdf")
+    assert attachment_source.is_safe_mime("발주서/pdf")  # non-ASCII printable OK
+    assert not attachment_source.is_safe_mime("text/plain\r\nX-Bad: 1")  # CR/LF
+    assert not attachment_source.is_safe_mime("a\x00b")  # NUL
+    assert not attachment_source.is_safe_mime("app\x7flication/pdf")  # DEL
+    assert not attachment_source.is_safe_mime("")
+
+
+def test_inline_mime_with_control_char_rejected():
+    data_b64 = base64.urlsafe_b64encode(b"x").rstrip(b"=").decode()
+    result = _resolve(
+        [{"filename": "a.txt", "mime_type": "text/plain\r\nX: y", "data_base64url": data_b64}],
+        key=None,
+    )
+    assert result["code"] == ToolErrorCode.BAD_REQUEST
+    assert "mime_type contains control characters" in result["message"]
+
+
+def test_upload_override_mime_with_control_char_rejected_slot_intact():
+    token = _upload_slot()
+    result = _resolve([{"source": "upload", "upload_token": token, "mime_type": "text/pl\r\nain"}])
+    assert result["code"] == ToolErrorCode.BAD_REQUEST
+    assert "mime_type contains control characters" in result["message"]
+    assert _still_consumable(token)  # rejected before consume
+
+
 def test_classify_backstop_rejects_ambiguous_and_neither():
     both = {"data_base64url": "aGk", "source": "upload", "upload_token": "A" * 20}
     neither = {"filename": "x"}
