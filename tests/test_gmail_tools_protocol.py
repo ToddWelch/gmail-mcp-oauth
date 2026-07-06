@@ -16,20 +16,21 @@ from mcp_gmail import mcp_protocol
 
 
 @pytest.mark.asyncio
-async def test_tools_list_returns_thirty_tools():
-    """All four manifests combine to advertise 32 tools
-    (11 read + 18 write + 1 bootstrap + 2 fanout extras)."""
+async def test_tools_list_returns_thirty_three_tools():
+    """All four manifests combine to advertise 33 tools
+    (11 read + 19 write + 1 bootstrap + 2 fanout extras)."""
     msg = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
     response = await mcp_protocol.handle_jsonrpc(msg)
     assert response is not None
     assert "result" in response
     tools = response["result"]["tools"]
-    assert len(tools) == 32
+    assert len(tools) == 33
     names = [t["name"] for t in tools]
     # Read tools
     assert "read_email" in names
     assert "list_email_labels" in names
-    # Write tools (14-tool surface)
+    # Write tools
+    assert "create_attachment_upload_slot" in names
     assert "send_email" in names
     assert "create_draft" in names
     assert "update_draft" in names

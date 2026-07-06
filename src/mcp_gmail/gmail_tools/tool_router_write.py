@@ -1,82 +1,35 @@
-"""Write-side tool dispatch (the 14 tools + the 4 tools = 18 total).
+"""Write-side tool dispatch (19 tools: 15 write + 4 cleanup).
 
 Split out of tool_router.py to honor the 300-LOC-per-file rule. The
-read-side router (tool_router.py) calls into _route_write_tool here
-when the tool name doesn't match a read tool. There is no behavioral
-split: the contract for `route_tool` in tool_router.py is unchanged.
-
-The 18 write tools, in this canonical order:
-
-    Send, drafts, and reply (7 tools):
-        send_email, create_draft, update_draft, list_drafts,
-        send_draft, delete_draft, reply_all
-    Label management (5 tools):
-        create_label, update_label, delete_label, modify_email_labels,
-        get_or_create_label
-    Filter management (3 tools):
-        create_filter, delete_filter,
-        create_filter_from_template
-    Delete and bulk modify (3 tools):
-        delete_email, batch_delete_emails,
-        batch_modify_emails
+read-side router (tool_router.py) calls into route_write_tool here when
+the tool name doesn't match a read tool; the `route_tool` contract is
+unchanged. Canonical order: create_attachment_upload_slot, send_email,
+create_draft, update_draft, list_drafts, send_draft, delete_draft,
+reply_all, then label / filter / delete / bulk-modify admin tools.
 
 Each branch validates argument shape via the require_/optional_ helpers
-defined in tool_router.py, then calls into the relevant tool module
-(send.py, reply.py, drafts.py, labels_write.py, filters_write.py,
-messages_write.py).
+passed from tool_router.py, then calls the relevant tool module.
 
-Sentinel return value
----------------------
-`_NOT_HANDLED` is returned when the tool name is not one of the 18
-write tools. The caller (route_tool in tool_router.py) translates that
-into an unknown_error response. We use a unique-per-module sentinel
-dict rather than None because some Gmail responses are legitimately
-{} (empty dict, also falsy).
+`_NOT_HANDLED` is returned when the tool name is not a write tool; the
+caller translates it into unknown_error. A unique sentinel dict (not
+None) is used because some Gmail responses are legitimately {}.
 """
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from . import drafts, filters_write, labels_write, messages_write, reply, send
-from .errors import bad_request_error
+from . import drafts, filters_write, labels_write, messages_write, reply, send, upload_slot
+from .attachment_source import load_attachments
 from .gmail_client import GmailClient
-from .message_format import Attachment
+
+if TYPE_CHECKING:  # pragma: no cover
+    from ..config import Settings
 
 
 # Sentinel for write-tool dispatch. Re-exported via tool_router so the
 # read-side outer function can compare results against it.
 _NOT_HANDLED: dict[str, Any] = {"__not_handled__": True}
-
-
-def _decode_attachments_arg(
-    raw: list[dict[str, Any]] | None,
-) -> list[Attachment] | None | dict[str, Any]:
-    """Decode the `attachments` argument for create_draft / update_draft.
-
-    Returns either a list of Attachment dataclasses, None (when raw is
-    None), or a bad_request_error dict on malformed input. send_email
-    decodes its own attachments inline because it also has to handle
-    the idempotency cache in the same flow; drafts.create_draft and
-    drafts.update_draft take pre-built Attachment objects, so the
-    decoder lives here.
-    """
-    if raw is None:
-        return None
-    if not isinstance(raw, list):
-        return bad_request_error("attachments must be a list")
-    out: list[Attachment] = []
-    # The base64 decoder lives once, in send.py. Lazy import here to
-    # avoid an import-cycle hazard; the function call still runs at
-    # cold-cache speed under pytest.
-    from .send import _decode_attachment
-
-    for i, item in enumerate(raw):
-        decoded = _decode_attachment(item, index=i)
-        if isinstance(decoded, dict):  # error dict
-            return decoded
-        out.append(decoded)
-    return out
 
 
 async def route_write_tool(
@@ -95,8 +48,9 @@ async def route_write_tool(
     optional_bool: Any,
     require_dict: Any,
     optional_dict: Any,
+    settings: "Settings | None" = None,
 ) -> dict[str, Any]:
-    """Dispatch the 14 write tools. Returns _NOT_HANDLED on miss.
+    """Dispatch the write tools. Returns _NOT_HANDLED on miss.
 
     The validation helpers are passed in by the caller rather than
     imported, so this module avoids a name clash with tool_router and
@@ -105,7 +59,29 @@ async def route_write_tool(
     `granted_scope` is forwarded so the send_draft branch can
     reject post-send actions when the caller granted only gmail.send
     (no gmail.modify) at handler entry, before any Gmail HTTP call.
+
+    `settings` is forwarded so the create_attachment_upload_slot branch
+    can build the upload URL and so the send/draft/reply branches can
+    thread the Fernet key(s) into attachment_source.load_attachments to
+    decrypt upload-slot bytes. Draft branches load (decrypt) here and
+    hand the token_hashes to drafts.*, which consume AFTER a successful
+    build (an oversize draft never burns a slot).
     """
+    enc_key = settings.encryption_key if settings is not None else None
+    prior_keys = settings.prior_encryption_keys if settings is not None else ()
+
+    # ----- Attachment upload slot ------------------------------------------
+    if tool_name == "create_attachment_upload_slot":
+        # No Gmail call: `client` is intentionally unused. Routed through
+        # the normal dispatch so the token-row lookup + scope check +
+        # audit run on the vetted path; a dead Google token fails fast.
+        if settings is None:  # pragma: no cover - dispatcher always supplies it
+            return _NOT_HANDLED
+        return upload_slot.create_upload_slot(
+            auth0_sub=auth0_sub,
+            account_email=account_email,
+            settings=settings,
+        )
 
     # ----- Send + drafts (6 tools) -----------------------------------------
     if tool_name == "send_email":
@@ -123,12 +99,21 @@ async def route_write_tool(
             reply_to_message_id=optional_str(arguments, "reply_to_message_id"),
             reply_to_references=optional_str_list(arguments, "reply_to_references"),
             idempotency_key=optional_str(arguments, "idempotency_key"),
+            encryption_key=enc_key,
+            prior_encryption_keys=prior_keys,
         )
 
     if tool_name == "create_draft":
-        decoded = _decode_attachments_arg(arguments.get("attachments"))
-        if isinstance(decoded, dict):
-            return decoded
+        loaded = load_attachments(
+            raw=arguments.get("attachments"),
+            auth0_sub=auth0_sub,
+            account_email=account_email,
+            encryption_key=enc_key,
+            prior_encryption_keys=prior_keys,
+        )
+        if isinstance(loaded, dict):
+            return loaded
+        atts, token_hashes = loaded
         return await drafts.create_draft(
             client=client,
             sender=require_str(arguments, "sender"),
@@ -137,18 +122,28 @@ async def route_write_tool(
             body_text=require_str(arguments, "body_text"),
             cc=optional_str_list(arguments, "cc"),
             bcc=optional_str_list(arguments, "bcc"),
-            attachments=decoded,
+            attachments=atts or None,
             reply_to_message_id=optional_str(arguments, "reply_to_message_id"),
             reply_to_references=optional_str_list(arguments, "reply_to_references"),
             # optional Gmail-API threadId. None when omitted so
             # the request body stays exactly the prior shape (back-compat).
             thread_id=optional_str(arguments, "thread_id"),
+            auth0_sub=auth0_sub,
+            account_email=account_email,
+            consume_token_hashes=token_hashes,
         )
 
     if tool_name == "update_draft":
-        decoded = _decode_attachments_arg(arguments.get("attachments"))
-        if isinstance(decoded, dict):
-            return decoded
+        loaded = load_attachments(
+            raw=arguments.get("attachments"),
+            auth0_sub=auth0_sub,
+            account_email=account_email,
+            encryption_key=enc_key,
+            prior_encryption_keys=prior_keys,
+        )
+        if isinstance(loaded, dict):
+            return loaded
+        atts, token_hashes = loaded
         return await drafts.update_draft(
             client=client,
             draft_id=require_str(arguments, "draft_id"),
@@ -158,12 +153,15 @@ async def route_write_tool(
             body_text=require_str(arguments, "body_text"),
             cc=optional_str_list(arguments, "cc"),
             bcc=optional_str_list(arguments, "bcc"),
-            attachments=decoded,
+            attachments=atts or None,
             reply_to_message_id=optional_str(arguments, "reply_to_message_id"),
             reply_to_references=optional_str_list(arguments, "reply_to_references"),
             # optional Gmail-API threadId. None when omitted so
             # the request body stays exactly the prior shape (back-compat).
             thread_id=optional_str(arguments, "thread_id"),
+            auth0_sub=auth0_sub,
+            account_email=account_email,
+            consume_token_hashes=token_hashes,
         )
 
     if tool_name == "list_drafts":
@@ -194,9 +192,8 @@ async def route_write_tool(
 
     # ----- reply_all -----------------------------------------------
     if tool_name == "reply_all":
-        decoded = _decode_attachments_arg(arguments.get("attachments"))
-        if isinstance(decoded, dict):
-            return decoded
+        # reply_all resolves/consumes attachments internally, AFTER its
+        # Gmail reads, so a bad message_id does not spend an upload slot.
         return await reply.reply_all(
             client=client,
             auth0_sub=auth0_sub,
@@ -205,8 +202,10 @@ async def route_write_tool(
             # audit harvest binds the source ID into the audit line.
             message_id=require_str(arguments, "message_id"),
             body_text=require_str(arguments, "body_text"),
-            attachments=decoded,
+            attachments=arguments.get("attachments"),
             idempotency_key=optional_str(arguments, "idempotency_key"),
+            encryption_key=enc_key,
+            prior_encryption_keys=prior_keys,
         )
 
     # ----- Label management (5 tools) ----------------------------

@@ -127,6 +127,8 @@ TOOL_SCOPE_REQUIREMENTS: dict[str, tuple[str, ...]] = {
     # Write tools.
     # ------------------------------------------------------------------
     # Sending and drafting
+    # create_attachment_upload_slot: SCOPE_SEND (send-capable; readonly-only rejected).
+    "create_attachment_upload_slot": (SCOPE_SEND,),
     "send_email": (SCOPE_SEND,),
     "create_draft": (SCOPE_COMPOSE,),
     "update_draft": (SCOPE_COMPOSE,),
@@ -165,16 +167,14 @@ TOOL_SCOPE_REQUIREMENTS: dict[str, tuple[str, ...]] = {
     # connect_gmail_account: bootstrap handshake; dispatcher short-circuits
     # before check_scopes runs (see bootstrap.is_bootstrap_tool and
     # dispatch.dispatch_tool_call). Empty tuple is a presence marker for
-    # test_table_has_exactly_30_tools, NOT "any scope is sufficient".
+    # test_table_has_exactly_33_tools, NOT "any scope is sufficient".
     "connect_gmail_account": (),
 }
 
 
-# Total tool count: 32 (11 read + 14 write + 4 cleanup + 1 bootstrap + 2 fanout).
-# Single source of truth for the canonical-count assertion in __init__.py;
-# tests reference this so drift in the manifest, dispatch table, or count
-# assertion fails fast.
-EXPECTED_TOOL_COUNT = 32
+# Total tool count: 33 (11 read + 15 write + 4 cleanup + 1 bootstrap + 2
+# fanout). Single source of truth for the __init__.py count assertion.
+EXPECTED_TOOL_COUNT = 33
 
 
 # ---------------------------------------------------------------------------

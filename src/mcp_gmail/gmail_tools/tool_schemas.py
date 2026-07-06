@@ -55,11 +55,18 @@ LABEL_ID_LIST_PROP: dict[str, Any] = {
 }
 
 
-ATTACHMENT_PROP: dict[str, Any] = {
+# Outbound attachment: a oneOf tagged union of two mutually exclusive
+# shapes. The dispatch-boundary validator (_schema_validator._StrictValidator)
+# extends Draft202012Validator overriding only `pattern`, so oneOf is
+# enforced server-side: an item matching zero or both branches is
+# rejected -32602 BEFORE the handler runs. attachment_source._classify
+# is a defensive backstop for programmatic callers that bypass the schema.
+_ATTACHMENT_INLINE_BRANCH: dict[str, Any] = {
     "type": "object",
     "description": (
-        "Outbound attachment. `data_base64url` is base64url-encoded "
-        "raw bytes (matches Gmail's download_attachment output)."
+        "Inline attachment. `data_base64url` is base64url-encoded raw "
+        "bytes (matches Gmail's download_attachment output). Impractical "
+        "for large binaries; use the upload-handle shape instead."
     ),
     "properties": {
         "filename": {"type": "string", "minLength": 1, "maxLength": 256},
@@ -68,6 +75,33 @@ ATTACHMENT_PROP: dict[str, Any] = {
     },
     "required": ["filename", "mime_type", "data_base64url"],
     "additionalProperties": False,
+}
+
+_ATTACHMENT_UPLOAD_BRANCH: dict[str, Any] = {
+    "type": "object",
+    "description": (
+        "Upload-handle attachment. Reference bytes uploaded out-of-band "
+        "via create_attachment_upload_slot + a curl to upload_url. "
+        "Single-use: the slot is consumed on send. filename / mime_type "
+        "override the values captured at upload time when supplied."
+    ),
+    "properties": {
+        "source": {"type": "string", "enum": ["upload"]},
+        "upload_token": {"type": "string", "pattern": "^[A-Za-z0-9_\\-]{16,64}$"},
+        "filename": {"type": "string", "minLength": 1, "maxLength": 256},
+        "mime_type": {"type": "string", "minLength": 1, "maxLength": 128},
+    },
+    "required": ["source", "upload_token"],
+    "additionalProperties": False,
+}
+
+ATTACHMENT_PROP: dict[str, Any] = {
+    "description": (
+        "Outbound attachment: exactly one of the inline shape "
+        "({filename, mime_type, data_base64url}) or the upload-handle "
+        "shape ({source:'upload', upload_token})."
+    ),
+    "oneOf": [_ATTACHMENT_INLINE_BRANCH, _ATTACHMENT_UPLOAD_BRANCH],
 }
 
 

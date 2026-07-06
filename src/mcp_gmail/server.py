@@ -41,6 +41,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 
+from . import attachment_routes
 from . import health as health_module
 from . import oauth_routes
 from .auth import AuthError, build_www_authenticate, validate_bearer_token
@@ -81,6 +82,12 @@ app.add_middleware(BodySizeLimitMiddleware)
 # /oauth/status, /oauth/disconnect). Defined in a separate module so
 # server.py stays focused on bearer-gated /mcp + public health/PRM.
 app.include_router(oauth_routes.router)
+
+# Mount POST /attachments/upload (the raw-body upload endpoint for the
+# large-attachment upload-slot flow). Authenticated by the capability
+# token in the X-Upload-Token header, NOT the /mcp bearer, so it is a
+# sibling router rather than gated behind mcp_endpoint.
+app.include_router(attachment_routes.router)
 
 
 # ---------------------------------------------------------------------------

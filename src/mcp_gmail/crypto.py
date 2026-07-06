@@ -110,3 +110,33 @@ def decrypt(ciphertext: bytes, key: str, *prior: str) -> str:
         return engine.decrypt(ciphertext).decode("utf-8")
     except InvalidToken as exc:
         raise CryptoError("decrypt failed: token is invalid or no key matched") from exc
+
+
+def encrypt_bytes(plaintext: bytes, key: str, *prior: str) -> bytes:
+    """Encrypt raw bytes with the configured Fernet key.
+
+    The str-oriented `encrypt` above utf-8-encodes its input; attachment
+    payloads are arbitrary binary (PDFs, images) that are not valid
+    utf-8, so they need a bytes-native path. Fernet operates on bytes
+    directly, so this is a thin wrapper that skips the encode step.
+    Returns the Fernet token as bytes suitable for a BYTEA column.
+
+    `*prior` is accepted but unused on encrypt (MultiFernet always
+    encrypts under the primary key); kept symmetric with `decrypt_bytes`.
+    """
+    engine = _make_engine(key, *prior)
+    return engine.encrypt(plaintext)
+
+
+def decrypt_bytes(ciphertext: bytes, key: str, *prior: str) -> bytes:
+    """Decrypt Fernet ciphertext back to raw bytes.
+
+    Bytes-native counterpart to `decrypt` (which utf-8-decodes). When
+    `*prior` keys are passed, MultiFernet attempts each in order. Raises
+    CryptoError on a malformed token, tampered HMAC, or no matching key.
+    """
+    engine = _make_engine(key, *prior)
+    try:
+        return engine.decrypt(ciphertext)
+    except InvalidToken as exc:
+        raise CryptoError("decrypt failed: token is invalid or no key matched") from exc

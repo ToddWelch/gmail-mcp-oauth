@@ -199,6 +199,51 @@ async def test_reply_all_empty_recipients_returns_bad_request(client):
 
 
 # ---------------------------------------------------------------------------
+# FIX-C: malformed header value at build -> typed bad_request, never a 500
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_reply_all_malformed_header_maps_to_bad_request(client):
+    """A source message whose Subject carries CR/LF makes build_email_message
+    raise ValueError; reply_all maps it to a typed bad_request (not a raw 500)
+    and never calls the send endpoint."""
+
+    def get_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=_original_message(
+                headers=[
+                    ("From", "alice@example.com"),
+                    ("To", "me@example.com"),
+                    ("Subject", "Hello\r\nX-Injected: y"),
+                    ("Message-ID", "<msg-1@example.com>"),
+                ]
+            ),
+        )
+
+    def profile_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"emailAddress": "me@example.com"})
+
+    with respx.mock(base_url=GMAIL_API_BASE, assert_all_called=False) as router:
+        router.get("/users/me/messages/ORIG").mock(side_effect=get_handler)
+        router.get("/users/me/profile").mock(side_effect=profile_handler)
+        send_route = router.post("/users/me/messages/send")
+        send_route.mock(return_value=httpx.Response(200, json={"id": "x"}))
+        r = await reply.reply_all(
+            client=client,
+            auth0_sub="u",
+            account_email="me@example.com",
+            message_id="ORIG",
+            body_text="hi",
+        )
+        assert send_route.called is False  # build failed -> NO send
+
+    assert r["code"] == ToolErrorCode.BAD_REQUEST
+    assert r["message"] == "message could not be built from the provided headers/attachments"
+
+
+# ---------------------------------------------------------------------------
 # getProfile failure -> upstream_error (N1)
 # ---------------------------------------------------------------------------
 

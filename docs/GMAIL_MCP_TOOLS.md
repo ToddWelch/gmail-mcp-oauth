@@ -25,13 +25,14 @@ and is updated alongside every PR that changes a tool surface.
 | `multi_search_emails` | `gmail.readonly` | read | Run up to 25 Gmail searches concurrently in one call. Returns ordered per-query results; failed queries surface as `{query, error_status, error_message}` records (partial-success). asyncio.gather under one OAuth token. |
 | `batch_read_emails` | `gmail.readonly` | read | Fetch up to 100 messages by ID concurrently. `format` enum is `["metadata", "minimal"]` (no full/raw). `metadata_headers` defaults to `['From', 'Subject', 'Date']`. Per-id failures surface as `{message_id, error_status, error_message}` records (partial-success). |
 
-## Tool surface (write, 14 tools)
+## Tool surface (write, 15 tools)
 
 | Tool | Required scope | Notes |
 |------|---------------|-------|
-| `send_email` | `gmail.send` | Optional `idempotency_key`; 60s in-process dedupe keyed by `(auth0_sub, account_email, idempotency_key)`. 25 MiB encoded-size cap on the assembled message. |
-| `create_draft` | `gmail.compose` | Same EmailMessage path as send_email; 25 MiB cap enforced. Optional `thread_id` sets `message.threadId` on the request, the authoritative thread join per Gmail's threading docs; header-only threading via `reply_to_message_id` / `reply_to_references` is best-effort fallback. |
-| `update_draft` | `gmail.compose` | Full PUT replace; the body wholly replaces the prior draft. Same `thread_id` parameter and semantics as `create_draft`. |
+| `create_attachment_upload_slot` | `gmail.send` (send-capable) | Mints a one-time upload slot for a large attachment. Returns `{upload_token, upload_url, expires_at, max_bytes}`. `gmail.send`, `gmail.compose`, `gmail.modify`, or `mail.google.com/` all satisfy it (send-capable); a readonly-only link gets `scope_insufficient`. Single-use, 15-minute TTL; per-user caps of 10 active slots and 100 MiB. See "Large attachments (upload slots)" below. |
+| `send_email` | `gmail.send` | Optional `idempotency_key`; 60s in-process dedupe keyed by `(auth0_sub, account_email, idempotency_key)`. 25 MiB encoded-size cap on the assembled message. Attachments accept an inline shape or an upload-handle shape (`{source:"upload", upload_token}`); upload handles are consumed on send. On a cache HIT no slot is consumed; if a send FAILS after consume, mint a fresh slot (a dead-token retry will not work). |
+| `create_draft` | `gmail.compose` | Same EmailMessage path as send_email; 25 MiB cap enforced. Optional `thread_id` sets `message.threadId` on the request, the authoritative thread join per Gmail's threading docs; header-only threading via `reply_to_message_id` / `reply_to_references` is best-effort fallback. Attachments accept the inline or upload-handle shape; upload handles are consumed when the draft is created. |
+| `update_draft` | `gmail.compose` | Full PUT replace; the body wholly replaces the prior draft. Same `thread_id` parameter and semantics as `create_draft`. Attachments accept the inline or upload-handle shape; upload handles are consumed when the draft is updated. |
 | `list_drafts` | `gmail.compose` | Returns id stubs; follow up with read_email per id for full content. |
 | `send_draft` | `gmail.send` (+ `gmail.modify` for post-send actions) | Consumes the draft (Gmail moves it from DRAFT to SENT). optional `archive_thread`, `add_labels`, `remove_labels` apply a follow-up modify_thread to the original thread AFTER the send succeeds. Post-send actions are best-effort: send-success + action-fail returns the success record annotated with `post_send_actions.applied=false` and `action_failures`; the send is NEVER retried. Send-fail returns the existing error shape with no actions attempted. Caller must have granted gmail.modify (subsumed by gmail.modify or full); a SEND-only token plus any post-send param returns `bad_request_error` at handler entry. |
 | `delete_draft` | `gmail.compose` | Permanent on the draft only; no impact on sent messages. |
@@ -48,7 +49,7 @@ and is updated alongside every PR that changes a tool surface.
 
 | Tool | Required scope | Notes |
 |------|---------------|-------|
-| `reply_all` | `gmail.send` + `gmail.readonly` | Pass the source message via the `message_id` input field. Replies to ALL recipients on the original message (To + Cc minus self), NOT just the sender. Self resolved via `users.getProfile`; getProfile failure surfaces as `upstream_error` rather than silent fallback. Expanded recipient set capped at 100. Idempotency cache shared with `send_email` (do not reuse the same `idempotency_key` for both tools). |
+| `reply_all` | `gmail.send` + `gmail.readonly` | Pass the source message via the `message_id` input field. Replies to ALL recipients on the original message (To + Cc minus self), NOT just the sender. Self resolved via `users.getProfile`; getProfile failure surfaces as `upstream_error` rather than silent fallback. Expanded recipient set capped at 100. Idempotency cache shared with `send_email` (do not reuse the same `idempotency_key` for both tools). Attachments accept the inline or upload-handle shape; upload handles are consumed on send (on a cache hit no slot is consumed). |
 | `batch_modify_emails` | `gmail.modify` | Bulk add/remove labels across up to 1000 messages in one Gmail call. Same endpoint as `batch_delete_emails` (`users.messages.batchModify`) but with caller-specified add/remove label sets. |
 | `get_or_create_label` | `gmail.modify` | Returns the existing label with the given name, or creates one if missing. TOCTOU race: if another caller creates the label between our list and our create, Gmail returns a duplicate-name 409. Name match is case-sensitive ("Important" and "important" are distinct). |
 | `create_filter_from_template` | `gmail.settings.basic` | Creates a Gmail filter from a named template. Templates: `auto_archive_sender`, `auto_label_sender`, `auto_label_from_keyword`. Empty / whitespace / single-character `query` rejected before any Gmail call (over-broad queries would label every future message). |
@@ -245,6 +246,79 @@ Boundary tests:
 
 The cap ships so the send tool can reuse the helper
 without re-implementing.
+
+## Large attachments (upload slots)
+
+Inlining a large binary as base64 in the tool call forces the model to
+reproduce the bytes verbatim, which corrupts them (a 208 KB shipping
+label's barcode becomes unscannable) and is impractical. Instead, use
+the upload-slot + handle flow: the file bytes are uploaded out-of-band
+straight from the machine that holds the file to the MCP server, and
+the send/draft tool references a handle. No bytes pass through the
+model; the server RECEIVES an upload (no path/URL fetch, so no SSRF or
+LFI).
+
+Flow:
+
+1. Call `create_attachment_upload_slot` with `account_email`. It
+   returns `{upload_token, upload_url, expires_at, max_bytes}`.
+2. From the machine that holds the file (e.g. the VPS where the client
+   runs), `curl` the raw bytes to `upload_url`. The capability token
+   travels in the `X-Upload-Token` header (never the URL, so it stays
+   out of access logs); the mime type is the `Content-Type` header and
+   the filename is `X-Attachment-Filename`:
+
+   ```bash
+   curl -sS -X POST "$UPLOAD_URL" \
+     -H "X-Upload-Token: $UPLOAD_TOKEN" \
+     -H "Content-Type: application/pdf" \
+     -H "X-Attachment-Filename: label.pdf" \
+     --data-binary @/path/to/label.pdf
+   ```
+
+   On success the server returns `{"stored": true, "size_bytes": N}`.
+3. Reference the handle in `send_email` / `create_draft` /
+   `update_draft` / `reply_all`:
+
+   ```json
+   {"attachments": [{"source": "upload", "upload_token": "<UPLOAD_TOKEN>"}]}
+   ```
+
+   `filename` and `mime_type` default to the values captured at upload
+   time; supply them in the attachment entry to override. Inline and
+   upload attachments may be mixed in one message.
+
+Guarantees and limits:
+
+- **Single-use**: the slot is consumed when the message is sent /
+  drafted. A replay, a second send, or a cross-user token is rejected.
+  If a send FAILS after the slot was consumed, mint a new slot.
+- **User-bound**: a slot is usable only by the `(auth0_sub,
+  account_email)` that minted it.
+- **TTL**: 15 minutes from mint (covers mint -> upload -> send).
+- **Size**: the upload endpoint streams up to 25 MiB (its memory/DoS
+  bound), but the effective send-through limit is ~18.5 MiB RAW because
+  base64 inflates the assembled message ~33% (plus RFC 2045 76-char
+  line-wrapping) under Gmail's 25 MiB encoded ceiling. The mint
+  response's `max_bytes` advertises this effective figure. An oversize
+  reference set (across all attachments + body) is rejected at REFERENCE
+  time with a clear error, and the slot is NOT consumed, so a corrected
+  retry succeeds.
+- **Caps**: 10 active slots and 100 MiB total per user.
+- **At rest**: uploaded bytes are Fernet-encrypted; they are deleted
+  the instant the slot is consumed, and expired/consumed rows are
+  purged at startup and hourly.
+- **One handle per message**: referencing the same `upload_token` twice
+  in one message's attachments is rejected with a `bad_request` (each
+  handle is single-use) before any load/consume; upload the file again
+  to attach a second copy.
+- **Header safety**: control characters (CR/LF/NUL and DEL/C1) in a
+  filename or mime/`Content-Type` are rejected before storing (upload
+  endpoint -> 400 `invalid_content_type` / `missing_or_invalid_filename`,
+  nothing stored) and before build (reference time -> `bad_request`). Any
+  malformed header/attachment value that still reaches message assembly
+  maps to a typed `bad_request` ("message could not be built ..."), never
+  a raw 500, and no slot is consumed.
 
 ## Idempotency cache (used by send_email)
 

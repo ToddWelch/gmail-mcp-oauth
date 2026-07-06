@@ -61,6 +61,7 @@ async def route_tool(
     auth0_sub: str = "",
     account_email: str = "",
     granted_scope: str = "",
+    settings: Any = None,
 ) -> dict[str, Any]:
     """Route to the named tool. Catches GmailApiError -> typed error dicts.
 
@@ -189,6 +190,7 @@ async def route_tool(
             optional_bool=optional_bool,
             require_dict=require_dict,
             optional_dict=_optional_dict,
+            settings=settings,
         )
         if write_result is _NOT_HANDLED:
             return unknown_error(f"tool not implemented: {tool_name}")
