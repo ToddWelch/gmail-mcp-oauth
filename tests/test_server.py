@@ -25,13 +25,35 @@ from mcp_gmail.server import (
 from .conftest import TEST_JWKS_URL, TEST_RESOURCE
 
 
+def _snapshot_filter_state() -> list[tuple[object, list]]:
+    """Snapshot the filter list of every logger/handler the app boot mutates.
+
+    Booting a TestClient runs the app lifespan, which calls
+    install_redacting_filter() and attaches process-global filters to the
+    root + uvicorn loggers (and their handlers). That install is never
+    removed, so leaked filters mutate records captured by later test
+    modules (e.g. redacting an `error_code=` audit substring). Snapshot
+    before boot; restore on teardown returns each scope to its exact
+    pre-fixture list without over-removing a pre-existing filter.
+    """
+    targets = [
+        logging.getLogger(),
+        logging.getLogger("uvicorn.access"),
+        logging.getLogger("uvicorn.error"),
+    ]
+    return [(scope, list(scope.filters)) for lg in targets for scope in (lg, *lg.handlers)]
+
+
 @pytest.fixture
 def client(jwks_document):
+    pre_filter_state = _snapshot_filter_state()
     with respx.mock(assert_all_called=False) as router:
         router.get(TEST_JWKS_URL).mock(return_value=httpx.Response(200, json=jwks_document))
         with TestClient(app) as c:
             c._respx_router = router
             yield c
+    for scope, filters in pre_filter_state:
+        scope.filters = list(filters)
 
 
 def test_health(client):

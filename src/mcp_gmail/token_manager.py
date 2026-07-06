@@ -26,7 +26,6 @@ from datetime import datetime, timezone
 
 from . import oauth_http
 from .db import session_scope
-from .gmail_tools.idempotency import default_cache as _idempotency_cache
 from .token_store import (
     get_decrypted_refresh_token,
     get_refresh_lock,
@@ -237,6 +236,14 @@ async def disconnect_account(
     """
     if not auth0_sub or not account_email:
         return False
+    # Lazy import to break the token_manager <-> gmail_tools import
+    # cycle: importing gmail_tools.idempotency at module scope triggers
+    # gmail_tools/__init__, which imports back into token_manager while
+    # it is still initializing. Deferring the import to this call site
+    # (the sole consumer of _idempotency_cache) keeps import-time
+    # dependencies acyclic. Same default_cache object, same semantics.
+    from .gmail_tools.idempotency import default_cache as _idempotency_cache
+
     email = account_email.strip().lower()
     key = (auth0_sub, email)
 
