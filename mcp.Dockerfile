@@ -13,6 +13,17 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1
 
+# Patch OS packages against known CVEs present in the pinned base image
+# (as of this change: libcap2 CVE-2026-4878, and the openssl /
+# libssl3t64 / openssl-provider-legacy CVE-2026-45447 use-after-free).
+# `upgrade` only pulls fixes already published to the Debian security
+# suite for this release, so the build stays reproducible against the
+# digest-pinned base. Placed as an early, stable layer (before the source
+# COPY) so it caches across source edits and only re-runs when the base
+# digest itself changes. `rm -rf /var/lib/apt/lists/*` keeps the apt index
+# out of the shipped image.
+RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
+
 # (supply-chain hardening): create a non-root user
 # BEFORE copying any files so the source tree can be chowned to the
 # user that will execute it. The `appuser` UID/GID are arbitrary
