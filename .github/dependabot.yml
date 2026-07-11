@@ -1,0 +1,31 @@
+version: 2
+
+# Daily dependency version-update scanning. This file configures the
+# version-update PRs only. The Dependabot *security-alert* toggle
+# (Settings > Code security > Dependabot alerts / security updates) is a
+# repository setting, not a file, and must be enabled separately.
+updates:
+  # Python dependencies. The pip ecosystem reads pyproject.toml and the
+  # pip-compile lockfiles; Dependabot opens PRs that bump the pins and
+  # regenerate hashes. Grouped so related bumps arrive as one PR rather
+  # than a flood of single-package PRs.
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "daily"
+    open-pull-requests-limit: 10
+    groups:
+      python-dependencies:
+        patterns:
+          - "*"
+
+  # GitHub Actions used by the CI and Security workflows.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "daily"
+    open-pull-requests-limit: 10
+    groups:
+      github-actions:
+        patterns:
+          - "*"
