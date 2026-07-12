@@ -48,6 +48,7 @@ from fastapi.responses import JSONResponse, Response
 from . import attachment_upload_store as store
 from .crypto import encrypt_bytes
 from .db import session_scope
+from .db_locks import acquire_user_upload_lock
 from .gmail_tools.attachment_source import is_safe_filename, is_safe_mime
 
 logger = logging.getLogger(__name__)
@@ -154,6 +155,12 @@ async def upload_attachment(request: Request) -> Response:
     with session_scope() as session:
         # (B5a) Per-user aggregate byte cap (size is known now).
         if owner_sub is not None:
+            # Serialize this user's concurrent sum+finalize so parallel
+            # uploads cannot each read the same pre-upload total and all
+            # commit past the cap. Transaction-scoped advisory lock on
+            # Postgres; a no-op on SQLite (no advisory-lock primitive, and
+            # SQLite serializes writes so the race is not reproducible).
+            acquire_user_upload_lock(session, owner_sub)
             active = store.sum_active_bytes(session, owner_sub)
             if active + size_bytes > store.MAX_ACTIVE_BYTES_PER_USER:
                 return _err(413, "user_storage_quota_exceeded")
