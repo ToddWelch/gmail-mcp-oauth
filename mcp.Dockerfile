@@ -7,7 +7,7 @@
 #   docker pull python:3.11-slim
 #   docker inspect --format='{{index .RepoDigests 0}}' python:3.11-slim
 # and update the line below.
-FROM python:3.11-slim@sha256:6d85378d88a19cd4d76079817532d62232be95757cb45945a99fec8e8084b9c2
+FROM python:3.14-slim@sha256:b877e50bd90de10af8d82c57a022fc2e0dc731c5320d762a27986facfc3355c1
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
