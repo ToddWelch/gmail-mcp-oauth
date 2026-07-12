@@ -22,6 +22,11 @@ dependencies = [
     # GHSA-537c-gmf6-5ccf: vulnerable OpenSSL bundled in wheels, fixed in 48.0.1.
     "cryptography>=48.0.1",
     "jsonschema>=4.21",
+    # HTML -> readable text for read_email/get_thread format='text' (the
+    # text/html fallback when a message has no text/plain part). MIT, and
+    # its transitives (beautifulsoup4, soupsieve, six) are MIT/PSF, so it
+    # is license-clean for this MIT project. Free, no API key, no network.
+    "markdownify>=1.2.3",
     # starlette arrives transitively via fastapi; pin the floor directly to
     # force the security-fixed release. CVE-2026-48818 (SSRF/NTLM via UNC in
     # StaticFiles) fixed in 1.1.0; CVE-2026-54283 (form() DoS) fixed in 1.3.1.

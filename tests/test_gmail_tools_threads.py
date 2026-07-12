@@ -37,6 +37,140 @@ async def test_get_thread_404(client):
 
 
 @pytest.mark.asyncio
+async def test_get_thread_invalid_format_rejected(client):
+    r = await threads.get_thread(client=client, thread_id="t1", format="bogus")
+    assert r["code"] == ToolErrorCode.BAD_REQUEST
+
+
+def _b64url(text: str) -> str:
+    import base64
+
+    return base64.urlsafe_b64encode(text.encode("utf-8")).rstrip(b"=").decode("ascii")
+
+
+@pytest.mark.asyncio
+async def test_get_thread_text_format_reduces_each_message(client):
+    """format='text' fetches with Gmail format='full' and reduces EACH
+    message to the lean shape; wrapper is {id, messages:[...]} plus
+    historyId when present. Bloated HTML is dropped."""
+    captured = {}
+    plain_a = "First message body."
+    big_html = "<html><body>" + ("<p>x</p>" * 20000) + "</body></html>"
+    assert len(big_html) > 100_000
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["format"] = request.url.params.get("format")
+        return httpx.Response(
+            200,
+            json={
+                "id": "t1",
+                "historyId": "9999",
+                "messages": [
+                    {
+                        "id": "m1",
+                        "threadId": "t1",
+                        "snippet": "first",
+                        "payload": {
+                            "mimeType": "text/plain",
+                            "headers": [{"name": "Subject", "value": "A"}],
+                            "body": {"data": _b64url(plain_a)},
+                        },
+                    },
+                    {
+                        "id": "m2",
+                        "threadId": "t1",
+                        "snippet": "second",
+                        "payload": {
+                            "mimeType": "text/html",
+                            "headers": [
+                                {"name": "Content-Type", "value": "text/html; charset=utf-8"},
+                                {"name": "Subject", "value": "B"},
+                            ],
+                            "body": {"data": _b64url(big_html)},
+                        },
+                    },
+                ],
+            },
+        )
+
+    with respx.mock(base_url=GMAIL_API_BASE) as router:
+        router.get("/users/me/threads/t1").mock(side_effect=handler)
+        r = await threads.get_thread(client=client, thread_id="t1", format="text")
+
+    assert captured["format"] == "full"  # Gmail called with 'full'
+    assert r["id"] == "t1"
+    assert r["historyId"] == "9999"
+    assert len(r["messages"]) == 2
+    assert r["messages"][0]["text"] == plain_a
+    assert r["messages"][0]["text_source"] == "text/plain"
+    assert r["messages"][1]["text_source"] == "text/html"
+    # No heavy payload survives on any message.
+    assert all("payload" not in m for m in r["messages"])
+    import json
+
+    serialized = json.dumps(r)
+    assert "<p>x</p>" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_get_thread_text_one_bad_message_does_not_fail_whole_thread(client, monkeypatch):
+    """FIX-2: per-message fault isolation. A thread with one hostile message
+    (whose extraction raises) plus one normal message returns BOTH: the
+    normal one intact, the hostile one degraded to a minimal entry. The
+    whole get_thread must NOT fail with -32603."""
+    import mcp_gmail.gmail_tools.message_text as mt
+
+    real_extract = mt.extract_lean_message
+
+    def _selective(message):
+        # Simulate an unexpected failure on the 'bad' message only; the
+        # safe wrapper must isolate it. The 'good' message extracts normally.
+        if message.get("id") == "bad":
+            raise RuntimeError("simulated hostile-message extraction failure")
+        return real_extract(message)
+
+    monkeypatch.setattr(mt, "extract_lean_message", _selective)
+
+    with respx.mock(base_url=GMAIL_API_BASE) as router:
+        router.get("/users/me/threads/t1").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "id": "t1",
+                    "messages": [
+                        {
+                            "id": "good",
+                            "threadId": "t1",
+                            "snippet": "ok",
+                            "payload": {
+                                "mimeType": "text/plain",
+                                "headers": [
+                                    {"name": "Content-Type", "value": "text/plain; charset=utf-8"}
+                                ],
+                                "body": {"data": _b64url("normal body")},
+                            },
+                        },
+                        {"id": "bad", "threadId": "t1", "payload": {"mimeType": "text/html"}},
+                    ],
+                },
+            )
+        )
+        r = await threads.get_thread(client=client, thread_id="t1", format="text")
+
+    # Not an error dict; the whole thread read succeeded.
+    assert "code" not in r
+    assert len(r["messages"]) == 2
+    good = next(m for m in r["messages"] if m["id"] == "good")
+    bad = next(m for m in r["messages"] if m["id"] == "bad")
+    assert good["text"] == "normal body"
+    assert good["text_source"] == "text/plain"
+    # The hostile one degraded to a minimal entry, not dropped, not crashing.
+    assert bad["text"] == ""
+    assert bad["text_source"] == "none"
+    assert bad["threadId"] == "t1"
+
+
+@pytest.mark.asyncio
 async def test_list_inbox_threads_passes_inbox_label(client):
     captured = {}
 

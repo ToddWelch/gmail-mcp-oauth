@@ -17,8 +17,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from .errors import not_found_error
+from .errors import bad_request_error, not_found_error
 from .gmail_client import GmailApiError, GmailClient
+from .message_text import safe_extract_lean_message
 
 
 # Default page size for inbox listings. Mirrors Gmail's default of 100
@@ -38,13 +39,41 @@ async def get_thread(
     thread_id: str,
     format: str = "full",
 ) -> dict[str, Any]:
-    """Return one thread by ID with all its messages."""
+    """Return one thread by ID with all its messages.
+
+    format='text' is the token-efficient read: Gmail has no 'text'
+    format, so we fetch with 'full' and reduce EACH message in the
+    thread to the lean shape (curated headers + decoded plain-text body
+    + attachment metadata) via message_text.extract_lean_message,
+    dropping every full payload, HTML part, and inline base64. The
+    thread wrapper is `{"id": <thread_id>, "messages": [<lean>...]}`
+    plus `historyId` when Gmail includes it.
+    """
+    if format not in ("full", "metadata", "minimal", "text"):
+        return bad_request_error(
+            f"format must be one of full|metadata|minimal|text, got {format!r}"
+        )
+    # 'text' is server-side sugar: Gmail is always called with 'full',
+    # then each message is reduced. Other formats pass straight through.
+    gmail_format = "full" if format == "text" else format
     try:
-        return await client.get_thread(thread_id=thread_id, format=format)
+        thread = await client.get_thread(thread_id=thread_id, format=gmail_format)
     except GmailApiError as exc:
         if exc.status == 404:
             return not_found_error(f"thread not found: {thread_id}")
         raise
+    if format == "text":
+        # Per-message fault isolation: safe_extract_lean_message degrades
+        # a single hostile/malformed message to a minimal entry rather
+        # than failing the whole thread read.
+        lean = {
+            "id": thread.get("id"),
+            "messages": [safe_extract_lean_message(m) for m in thread.get("messages") or []],
+        }
+        if thread.get("historyId") is not None:
+            lean["historyId"] = thread.get("historyId")
+        return lean
+    return thread
 
 
 # ---------------------------------------------------------------------------

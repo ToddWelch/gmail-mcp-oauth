@@ -102,6 +102,29 @@ def test_reject_enum_violation():
     assert field is not None and "format" in field
 
 
+@pytest.mark.parametrize("fmt", ["full", "metadata", "minimal", "raw", "text"])
+def test_read_email_format_enum_accepts_all_values(fmt):
+    """The read_email format enum accepts the new 'text' value alongside
+    the existing full/metadata/minimal/raw at the schema boundary."""
+    args = {"account_email": EMAIL, "message_id": GMAIL_ID, "format": fmt}
+    assert validate_arguments("read_email", args) is None
+
+
+@pytest.mark.parametrize("fmt", ["full", "metadata", "minimal", "text"])
+def test_get_thread_format_enum_accepts_all_values(fmt):
+    """The get_thread format enum accepts 'text' alongside the existing
+    full/metadata/minimal (note: no 'raw' on threads)."""
+    args = {"account_email": EMAIL, "thread_id": THREAD_ID, "format": fmt}
+    assert validate_arguments("get_thread", args) is None
+
+
+def test_get_thread_rejects_raw_format():
+    """'raw' is a read_email-only format; get_thread must still reject it."""
+    args = {"account_email": EMAIL, "thread_id": THREAD_ID, "format": "raw"}
+    field = validate_arguments("get_thread", args)
+    assert field is not None and "format" in field
+
+
 def test_reject_max_length_violation():
     """search_emails.q has maxLength=1000."""
     field = validate_arguments("search_emails", {"account_email": EMAIL, "q": "x" * 1001})

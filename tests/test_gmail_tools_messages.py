@@ -113,6 +113,98 @@ async def test_read_email_invalid_format_rejected(client):
     assert r["code"] == ToolErrorCode.BAD_REQUEST
 
 
+def _b64url(text: str) -> str:
+    import base64
+
+    return base64.urlsafe_b64encode(text.encode("utf-8")).rstrip(b"=").decode("ascii")
+
+
+@pytest.mark.asyncio
+async def test_read_email_text_format_returns_lean_and_calls_full(client):
+    """format='text' fetches Gmail with format='full' (Gmail has no
+    'text' format) and returns the lean shape."""
+    captured = {}
+    plain = "Order total $42.00"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["format"] = request.url.params.get("format")
+        return httpx.Response(
+            200,
+            json={
+                "id": "M1",
+                "threadId": "T1",
+                "labelIds": ["INBOX"],
+                "snippet": "Order",
+                "payload": {
+                    "mimeType": "text/plain",
+                    "headers": [{"name": "Subject", "value": "Order"}],
+                    "body": {"data": _b64url(plain)},
+                },
+            },
+        )
+
+    with respx.mock(base_url=GMAIL_API_BASE) as router:
+        router.get("/users/me/messages/M1").mock(side_effect=handler)
+        r = await messages.read_email(client=client, message_id="M1", format="text")
+
+    assert captured["format"] == "full"  # Gmail is called with 'full'
+    assert r["text"] == plain
+    assert r["text_source"] == "text/plain"
+    assert r["headers"] == {"Subject": "Order"}
+    assert r["id"] == "M1"
+    assert "payload" not in r  # the heavy payload is dropped
+
+
+@pytest.mark.asyncio
+async def test_read_email_text_format_drops_bloated_html(client):
+    """The reported problem, at the tool boundary: a ~200KB text/html
+    part next to a small text/plain yields a small lean response."""
+    import json
+
+    plain = "Small plain body."
+    big_html = "<html><body>" + ("<div>row</div>" * 20000) + "</body></html>"
+    assert len(big_html) > 200_000
+
+    with respx.mock(base_url=GMAIL_API_BASE) as router:
+        router.get("/users/me/messages/M1").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "id": "M1",
+                    "threadId": "T1",
+                    "snippet": "s",
+                    "payload": {
+                        "mimeType": "multipart/alternative",
+                        "headers": [{"name": "Subject", "value": "S"}],
+                        "parts": [
+                            {
+                                "mimeType": "text/plain",
+                                "headers": [
+                                    {"name": "Content-Type", "value": "text/plain; charset=utf-8"}
+                                ],
+                                "body": {"data": _b64url(plain)},
+                            },
+                            {
+                                "mimeType": "text/html",
+                                "headers": [
+                                    {"name": "Content-Type", "value": "text/html; charset=utf-8"}
+                                ],
+                                "body": {"data": _b64url(big_html)},
+                            },
+                        ],
+                    },
+                },
+            )
+        )
+        r = await messages.read_email(client=client, message_id="M1", format="text")
+
+    assert r["text"] == plain
+    assert r["text_source"] == "text/plain"
+    serialized = json.dumps(r)
+    assert len(serialized) < 4_000  # a few KB, not 200KB+
+    assert "row" not in serialized
+
+
 @pytest.mark.asyncio
 async def test_search_emails_passes_query(client):
     captured = {}

@@ -1,12 +1,15 @@
-"""TOOL_DEFINITIONS: read manifest, 11 entries (8 native + 3 spliced).
+"""TOOL_DEFINITIONS: read manifest, 11 entries (5 native + 3 + 3 spliced).
 
-Native here: 8 message and thread tools (read_email, search_emails,
-download_attachment, download_email, get_thread, list_inbox_threads,
-get_inbox_with_threads, modify_thread). Spliced from
-tool_definitions_labels_filters.py: 3 label and filter tools
-(list_email_labels, list_filters, get_filter). Split for the 300-LOC
-rule. gmail_tools/__init__.py concatenates this read manifest with
-the write, bootstrap, and extras manifests for the 33-tool surface.
+Native here: 5 message and thread tools (read_email, search_emails,
+download_attachment, download_email, get_thread). Spliced from
+tool_definitions_threads_manage.py: 3 thread-management tools
+(list_inbox_threads, get_inbox_with_threads, modify_thread), split out
+so this file stays under the 300-LOC rule after the format='text'
+description additions. Spliced from tool_definitions_labels_filters.py:
+3 label and filter tools (list_email_labels, list_filters, get_filter).
+Both splices preserve the original manifest order. Split for the
+300-LOC rule. gmail_tools/__init__.py concatenates this read manifest
+with the write, bootstrap, and extras manifests for the 33-tool surface.
 
 Every Gmail-ID-shaped field carries a `pattern` matching
 gmail_id._VALIDATION_PATTERN ({1,256}). download_attachment.attachment_id
@@ -21,6 +24,7 @@ from __future__ import annotations
 from typing import Any
 
 from .tool_definitions_labels_filters import TOOL_DEFINITIONS_LABELS_FILTERS
+from .tool_definitions_threads_manage import TOOL_DEFINITIONS_THREADS_MANAGE
 from .tool_schemas import ACCOUNT_EMAIL_PROP
 
 
@@ -32,7 +36,18 @@ _READ_EMAIL_DEF: dict[str, Any] = {
         "attachment metadata (but not attachment bytes; use "
         "download_attachment for those). Format='metadata' returns "
         "headers only; 'minimal' returns IDs only; 'raw' returns "
-        "the RFC 5322 base64url-encoded message."
+        "the RFC 5322 base64url-encoded message. Format='text' is the "
+        "token-efficient read for bloated HTML emails (e.g. Amazon "
+        "order/receipt emails that run 170K-250K chars): it returns a "
+        "LEAN object with curated headers, the decoded plain-text body "
+        "only (prefers the text/plain part; converts text/html when "
+        "there is no text/plain), a text_source field, and attachment "
+        "metadata (no bytes), dropping the HTML part and inline base64 "
+        "so the response stays small. The returned text is capped at "
+        "100000 chars; if longer it is truncated with a marker and "
+        "text_truncated=true (fall back to format='full' or download for "
+        "the complete body). Prefer 'text' over 'full' when you only "
+        "need the readable body."
     ),
     "inputSchema": {
         "type": "object",
@@ -47,8 +62,11 @@ _READ_EMAIL_DEF: dict[str, Any] = {
             },
             "format": {
                 "type": "string",
-                "description": "Gmail response format. Default 'full'.",
-                "enum": ["full", "metadata", "minimal", "raw"],
+                "description": (
+                    "Gmail response format. Default 'full'. Use 'text' "
+                    "for a lean plain-text read of bloated HTML emails."
+                ),
+                "enum": ["full", "metadata", "minimal", "raw", "text"],
             },
         },
         "required": ["account_email", "message_id"],
@@ -191,7 +209,16 @@ _DOWNLOAD_EMAIL_DEF: dict[str, Any] = {
 
 _GET_THREAD_DEF: dict[str, Any] = {
     "name": "get_thread",
-    "description": "Return one Gmail thread by ID with all its messages.",
+    "description": (
+        "Return one Gmail thread by ID with all its messages. "
+        "Format='text' is the token-efficient read for threads with "
+        "bloated HTML emails: it reduces EACH message to a lean object "
+        "(curated headers, decoded plain-text body only, text_source, "
+        "and attachment metadata without bytes), dropping every HTML "
+        "part and inline base64. Each message's text is capped at "
+        "100000 chars (truncated with a marker and text_truncated=true "
+        "when longer). The wrapper is {id, messages:[<lean>...]}."
+    ),
     "inputSchema": {
         "type": "object",
         "properties": {
@@ -204,7 +231,11 @@ _GET_THREAD_DEF: dict[str, Any] = {
             },
             "format": {
                 "type": "string",
-                "enum": ["full", "metadata", "minimal"],
+                "description": (
+                    "Thread format. Default 'full'. Use 'text' for a "
+                    "lean per-message plain-text read."
+                ),
+                "enum": ["full", "metadata", "minimal", "text"],
             },
         },
         "required": ["account_email", "thread_id"],
@@ -213,109 +244,28 @@ _GET_THREAD_DEF: dict[str, Any] = {
 }
 
 
-_LIST_INBOX_THREADS_DEF: dict[str, Any] = {
-    "name": "list_inbox_threads",
-    "description": (
-        "List threads currently in the INBOX label. Returns a page "
-        "of thread stubs (id + history fields); follow up with "
-        "get_thread per ID for full message content. For inbox "
-        "summaries with subject/sender/snippet metadata baked in, "
-        "use get_inbox_with_threads instead."
-    ),
-    "inputSchema": {
-        "type": "object",
-        "properties": {
-            "account_email": ACCOUNT_EMAIL_PROP,
-            "page_token": {"type": "string"},
-            "max_results": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": 500,
-            },
-        },
-        "required": ["account_email"],
-        "additionalProperties": False,
-    },
-}
-
-
-_GET_INBOX_WITH_THREADS_DEF: dict[str, Any] = {
-    "name": "get_inbox_with_threads",
-    "description": (
-        "List INBOX threads and expand each into a one-call summary "
-        "(thread_id, subject, from_addr, snippet, message_count, "
-        "last_message_id). Convenience for an at-a-glance inbox "
-        "view without making the model call read_email N times."
-    ),
-    "inputSchema": {
-        "type": "object",
-        "properties": {
-            "account_email": ACCOUNT_EMAIL_PROP,
-            "max_results": {
-                "type": "integer",
-                "description": "Default 25. Each thread costs an extra Gmail HTTP call.",
-                "minimum": 1,
-                "maximum": 100,
-            },
-        },
-        "required": ["account_email"],
-        "additionalProperties": False,
-    },
-}
-
-
-_MODIFY_THREAD_DEF: dict[str, Any] = {
-    "name": "modify_thread",
-    "description": (
-        "Add and/or remove labels on a thread. Requires "
-        "gmail.modify scope; readonly-only links will see "
-        "scope_insufficient. Returns the updated thread metadata. "
-        "INBOX is a label, so moving a thread into the inbox is "
-        "`add_label_ids=['INBOX']`; archiving is "
-        "`remove_label_ids=['INBOX']`."
-    ),
-    "inputSchema": {
-        "type": "object",
-        "properties": {
-            "account_email": ACCOUNT_EMAIL_PROP,
-            "thread_id": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 256,
-                "pattern": "^[A-Za-z0-9_\\-]{1,256}$",
-            },
-            "add_label_ids": {
-                "type": "array",
-                "items": {"type": "string", "pattern": "^[A-Za-z0-9_\\-]{1,256}$"},
-                "maxItems": 50,
-            },
-            "remove_label_ids": {
-                "type": "array",
-                "items": {"type": "string", "pattern": "^[A-Za-z0-9_\\-]{1,256}$"},
-                "maxItems": 50,
-            },
-        },
-        "required": ["account_email", "thread_id"],
-        "additionalProperties": False,
-    },
-}
-
-
-# Public list. The 8 message+thread entries first, then 3
-# label+filter entries spliced from tool_definitions_labels_filters.py
-# to keep this file under 300 LOC. The splice mirrors the precedent
-# in tool_definitions_admin.py (which splices in
-# tool_definitions_admin_cleanup.py the same way).
-TOOL_DEFINITIONS: list[dict[str, Any]] = [
-    _READ_EMAIL_DEF,
-    _SEARCH_EMAILS_DEF,
-    _DOWNLOAD_ATTACHMENT_DEF,
-    _DOWNLOAD_EMAIL_DEF,
-    _GET_THREAD_DEF,
-    _LIST_INBOX_THREADS_DEF,
-    _GET_INBOX_WITH_THREADS_DEF,
-    _MODIFY_THREAD_DEF,
-] + list(TOOL_DEFINITIONS_LABELS_FILTERS)
+# Public list. The 5 native message+thread entries first, then the 3
+# thread-management entries spliced from
+# tool_definitions_threads_manage.py, then the 3 label+filter entries
+# spliced from tool_definitions_labels_filters.py, all to keep this
+# file under 300 LOC. Both splices mirror the precedent in
+# tool_definitions_admin.py (which splices in
+# tool_definitions_admin_cleanup.py the same way). The concatenation
+# order reproduces the pre-split manifest order exactly (read_email,
+# search_emails, download_attachment, download_email, get_thread,
+# list_inbox_threads, get_inbox_with_threads, modify_thread, then
+# labels/filters), so no index-dependent assertion is affected.
+TOOL_DEFINITIONS: list[dict[str, Any]] = (
+    [
+        _READ_EMAIL_DEF,
+        _SEARCH_EMAILS_DEF,
+        _DOWNLOAD_ATTACHMENT_DEF,
+        _DOWNLOAD_EMAIL_DEF,
+        _GET_THREAD_DEF,
+    ]
+    + list(TOOL_DEFINITIONS_THREADS_MANAGE)
+    + list(TOOL_DEFINITIONS_LABELS_FILTERS)
+)
 
 
 assert len(TOOL_DEFINITIONS) == 11, (
