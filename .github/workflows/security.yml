@@ -1,0 +1,144 @@
+name: Security
+
+# Runs the security-scanning gates on every PR to main and every push to
+# main, matching the CI workflow's triggers. Kept separate from ci.yml so
+# the "Lint and test" job stays untouched and the scanner tooling (a Go
+# binary for Trivy, a Docker image build for the image scan) is isolated.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Bandit: Python SAST over the application source.
+  # Gate: HIGH severity + HIGH confidence only (-lll -iii). MEDIUM/LOW findings
+  # are reported by the non-blocking full run but do not fail the job, per the
+  # security policy (block on HIGH). Triaged clean at this gate on adoption.
+  # ---------------------------------------------------------------------------
+  bandit:
+    name: Bandit SAST (Python)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Bandit
+        run: pip install bandit==1.9.4
+
+      - name: Bandit report (all severities, non-blocking)
+        run: bandit -r src -f txt || true
+
+      - name: Bandit gate (HIGH severity + HIGH confidence)
+        run: bandit -r src -lll -iii
+
+  # ---------------------------------------------------------------------------
+  # Semgrep: cross-language SAST using the standard free registry rulesets.
+  # Gate: ERROR-level findings fail the job (--error --severity ERROR).
+  # Uses the pip CLI with the public p/ rulesets: NO Semgrep account, NO login,
+  # NO token required. Triaged clean (0 findings) at this gate on adoption.
+  # ---------------------------------------------------------------------------
+  semgrep:
+    name: Semgrep SAST (cross-language)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Semgrep
+        run: pip install semgrep==1.169.0
+
+      - name: Semgrep gate (ERROR level, free rulesets)
+        run: >-
+          semgrep scan
+          --config p/python
+          --config p/security-audit
+          --config p/secrets
+          --error
+          --severity ERROR
+          src/
+
+  # ---------------------------------------------------------------------------
+  # Trivy: dependency + container scanning.
+  # Gate: CRITICAL and HIGH. --ignore-unfixed drops vulnerabilities with no
+  # available fix (the pinned Debian base carries unpatchable perl-base and
+  # similar OS CVEs that cannot be remediated; gating on them would make the
+  # check permanently red). When Debian ships fixes they start gating again.
+  #
+  # Two scans, deliberately split by layer:
+  #  (fs)    gates our RUNTIME Python dependencies. Trivy's pip parser only
+  #          matches files literally named requirements.txt by default, so
+  #          --file-patterns maps requirements*.lock into the pip parser.
+  #          WITHOUT this the fs scan reports zero packages (false green).
+  #          Installed == lock (hash-pinned), so this is the authoritative
+  #          gate on the code we actually import at runtime.
+  #  (image) gates the OS layer ONLY (vuln-type: os). It builds the production
+  #          image from mcp.Dockerfile so it reflects the apt-get upgrade layer
+  #          that patches the fixable base OS CVEs. It deliberately does NOT
+  #          gate the image's Python site-packages: those are base-image build
+  #          tooling (pip/setuptools/wheel and their vendored deps like
+  #          jaraco.*), owned by the base-image maintainer, not pinned by us,
+  #          and low runtime risk under our --require-hashes install. Newer
+  #          base digests carry the fixed tooling and flow in via the
+  #          Dependabot `docker` ecosystem instead of a hard gate here.
+  # ---------------------------------------------------------------------------
+  trivy:
+    name: Trivy (deps + container)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Trivy filesystem scan (pip lockfiles)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+        # The action exposes no file-patterns input, but it leaves the
+        # TRIVY_FILE_PATTERNS env var untouched and Trivy reads it natively.
+        # This maps our pip-compile lockfiles into the pip parser; without it
+        # the fs scan finds zero packages (false green).
+        env:
+          TRIVY_FILE_PATTERNS: 'pip:requirements.*\.lock'
+
+      - name: Build production image
+        run: docker build -f mcp.Dockerfile -t mcp-gmail:scan .
+
+      - name: Trivy image scan (OS packages only)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: mcp-gmail:scan
+          scanners: vuln
+          # vuln-type maps to Trivy's --pkg-types (env TRIVY_PKG_TYPES) in the
+          # pinned action/Trivy version. `os` scopes the gate to the OS layer;
+          # runtime Python deps are gated by the fs/lockfile scan above.
+          vuln-type: os
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
