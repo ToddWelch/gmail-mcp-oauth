@@ -157,6 +157,15 @@ The service exposes 33 tools to MCP clients:
   `batch_read_emails`, `download_attachment`, `download_email`,
   `get_thread`, `list_inbox_threads`, `get_inbox_with_threads`,
   `modify_thread`, `list_email_labels`, `list_filters`, `get_filter`).
+  `read_email` and `get_thread` accept `format="text"`, a
+  token-efficient plain-text read for bloated HTML emails (e.g. Amazon
+  order/receipt emails that run 170K-250K chars and otherwise blow past
+  the MCP output token cap). It returns a lean object (curated headers +
+  decoded plain-text body + attachment metadata, no bytes), preferring
+  the `text/plain` part and falling back to `text/html` converted via
+  markdownify when there is no `text/plain`. See
+  [`docs/GMAIL_MCP_TOOLS.md`](docs/GMAIL_MCP_TOOLS.md) for the full
+  return shape.
 - 15 write tools (`create_attachment_upload_slot`, `send_email`,
   `create_draft`, `update_draft`, `list_drafts`, `send_draft`,
   `delete_draft`, `create_label`, `update_label`, `delete_label`,

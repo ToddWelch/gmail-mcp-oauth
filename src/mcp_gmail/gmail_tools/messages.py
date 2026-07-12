@@ -40,6 +40,7 @@ from typing import Any
 from .attachment_download import download_attachment
 from .errors import bad_request_error, not_found_error
 from .gmail_client import GmailApiError, GmailClient
+from .message_text import extract_lean_message
 
 # download_attachment lives in attachment_download.py (split out under
 # the 300-LOC / distinct-responsibility rule). Re-exported here so the
@@ -71,15 +72,30 @@ async def read_email(
     from a token belonging to a specific (auth0_sub, account_email),
     so the row lookup that produced the access token rejects mismatched
     actors before this function runs.
+
+    format='text' is a token-efficient read for bloated HTML emails:
+    Gmail has no 'text' format, so we fetch with 'full' and reduce the
+    message to a LEAN object (curated headers + decoded plain-text body
+    + attachment metadata) via message_text.extract_lean_message,
+    dropping the full payload, HTML part, and inline base64. See
+    message_text.py for the body-selection and charset rules.
     """
-    if format not in ("full", "metadata", "minimal", "raw"):
-        return bad_request_error(f"format must be one of full|metadata|minimal|raw, got {format!r}")
+    if format not in ("full", "metadata", "minimal", "raw", "text"):
+        return bad_request_error(
+            f"format must be one of full|metadata|minimal|raw|text, got {format!r}"
+        )
+    # 'text' is server-side sugar: Gmail is always called with 'full',
+    # then reduced. Every other format passes straight through.
+    gmail_format = "full" if format == "text" else format
     try:
-        return await client.get_message(message_id=message_id, format=format)
+        message = await client.get_message(message_id=message_id, format=gmail_format)
     except GmailApiError as exc:
         if exc.status == 404:
             return not_found_error(f"message not found: {message_id}")
         raise
+    if format == "text":
+        return extract_lean_message(message)
+    return message
 
 
 # ---------------------------------------------------------------------------
