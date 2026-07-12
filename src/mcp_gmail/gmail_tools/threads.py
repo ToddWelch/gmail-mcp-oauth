@@ -19,7 +19,7 @@ from typing import Any
 
 from .errors import bad_request_error, not_found_error
 from .gmail_client import GmailApiError, GmailClient
-from .message_text import extract_lean_message
+from .message_text import safe_extract_lean_message
 
 
 # Default page size for inbox listings. Mirrors Gmail's default of 100
@@ -63,9 +63,12 @@ async def get_thread(
             return not_found_error(f"thread not found: {thread_id}")
         raise
     if format == "text":
+        # Per-message fault isolation: safe_extract_lean_message degrades
+        # a single hostile/malformed message to a minimal entry rather
+        # than failing the whole thread read.
         lean = {
             "id": thread.get("id"),
-            "messages": [extract_lean_message(m) for m in thread.get("messages") or []],
+            "messages": [safe_extract_lean_message(m) for m in thread.get("messages") or []],
         }
         if thread.get("historyId") is not None:
             lean["historyId"] = thread.get("historyId")

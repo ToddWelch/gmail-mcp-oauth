@@ -113,6 +113,64 @@ async def test_get_thread_text_format_reduces_each_message(client):
 
 
 @pytest.mark.asyncio
+async def test_get_thread_text_one_bad_message_does_not_fail_whole_thread(client, monkeypatch):
+    """FIX-2: per-message fault isolation. A thread with one hostile message
+    (whose extraction raises) plus one normal message returns BOTH: the
+    normal one intact, the hostile one degraded to a minimal entry. The
+    whole get_thread must NOT fail with -32603."""
+    import mcp_gmail.gmail_tools.message_text as mt
+
+    real_extract = mt.extract_lean_message
+
+    def _selective(message):
+        # Simulate an unexpected failure on the 'bad' message only; the
+        # safe wrapper must isolate it. The 'good' message extracts normally.
+        if message.get("id") == "bad":
+            raise RuntimeError("simulated hostile-message extraction failure")
+        return real_extract(message)
+
+    monkeypatch.setattr(mt, "extract_lean_message", _selective)
+
+    with respx.mock(base_url=GMAIL_API_BASE) as router:
+        router.get("/users/me/threads/t1").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "id": "t1",
+                    "messages": [
+                        {
+                            "id": "good",
+                            "threadId": "t1",
+                            "snippet": "ok",
+                            "payload": {
+                                "mimeType": "text/plain",
+                                "headers": [
+                                    {"name": "Content-Type", "value": "text/plain; charset=utf-8"}
+                                ],
+                                "body": {"data": _b64url("normal body")},
+                            },
+                        },
+                        {"id": "bad", "threadId": "t1", "payload": {"mimeType": "text/html"}},
+                    ],
+                },
+            )
+        )
+        r = await threads.get_thread(client=client, thread_id="t1", format="text")
+
+    # Not an error dict; the whole thread read succeeded.
+    assert "code" not in r
+    assert len(r["messages"]) == 2
+    good = next(m for m in r["messages"] if m["id"] == "good")
+    bad = next(m for m in r["messages"] if m["id"] == "bad")
+    assert good["text"] == "normal body"
+    assert good["text_source"] == "text/plain"
+    # The hostile one degraded to a minimal entry, not dropped, not crashing.
+    assert bad["text"] == ""
+    assert bad["text_source"] == "none"
+    assert bad["threadId"] == "t1"
+
+
+@pytest.mark.asyncio
 async def test_list_inbox_threads_passes_inbox_label(client):
     captured = {}
 

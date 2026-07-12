@@ -43,8 +43,11 @@ _READ_EMAIL_DEF: dict[str, Any] = {
         "only (prefers the text/plain part; converts text/html when "
         "there is no text/plain), a text_source field, and attachment "
         "metadata (no bytes), dropping the HTML part and inline base64 "
-        "so the response stays small. Prefer 'text' over 'full' when "
-        "you only need the readable body."
+        "so the response stays small. The returned text is capped at "
+        "100000 chars; if longer it is truncated with a marker and "
+        "text_truncated=true (fall back to format='full' or download for "
+        "the complete body). Prefer 'text' over 'full' when you only "
+        "need the readable body."
     ),
     "inputSchema": {
         "type": "object",
@@ -212,8 +215,9 @@ _GET_THREAD_DEF: dict[str, Any] = {
         "bloated HTML emails: it reduces EACH message to a lean object "
         "(curated headers, decoded plain-text body only, text_source, "
         "and attachment metadata without bytes), dropping every HTML "
-        "part and inline base64. The wrapper is "
-        "{id, messages:[<lean>...]}."
+        "part and inline base64. Each message's text is capped at "
+        "100000 chars (truncated with a marker and text_truncated=true "
+        "when longer). The wrapper is {id, messages:[<lean>...]}."
     ),
     "inputSchema": {
         "type": "object",

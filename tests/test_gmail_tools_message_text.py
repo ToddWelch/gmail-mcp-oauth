@@ -12,7 +12,11 @@ from __future__ import annotations
 
 import base64
 
-from mcp_gmail.gmail_tools.message_text import extract_lean_message
+from mcp_gmail.gmail_tools.message_text import (
+    MAX_TEXT_CHARS,
+    extract_lean_message,
+    safe_extract_lean_message,
+)
 
 
 def _b64url(text: str, charset: str = "utf-8") -> str:
@@ -401,3 +405,167 @@ def test_curated_headers_omit_absent_and_are_case_insensitive():
     }
     assert "Received" not in lean["headers"]
     assert "DKIM-Signature" not in lean["headers"]
+
+
+# ---------------------------------------------------------------------------
+# FIX-1: HTML conversion must never raise on hostile HTML
+# ---------------------------------------------------------------------------
+
+
+def test_deeply_nested_hostile_html_degrades_without_raising():
+    """No text/plain + a deeply-nested text/html that can blow markdownify's
+    recursive DOM walk: extract_lean_message must NOT raise; it degrades to
+    empty text while keeping text_source == 'text/html'."""
+    hostile = "<div>" * 4000 + "hi" + "</div>" * 4000
+    message = {
+        "id": "MHTML",
+        "threadId": "T",
+        "payload": {
+            "mimeType": "text/html",
+            "headers": _headers(("Content-Type", "text/html; charset=utf-8")),
+            "body": {"data": _b64url(hostile)},
+        },
+    }
+
+    # Must not raise (RecursionError or any bs4/markdownify parse failure).
+    lean = extract_lean_message(message)
+
+    assert lean["text_source"] == "text/html"
+    assert lean["text"] == ""
+
+
+def test_markdownify_arbitrary_failure_degrades(monkeypatch):
+    """Any markdownify/bs4 failure (not just RecursionError) on hostile HTML
+    degrades to empty text with text_source == 'text/html', never propagates."""
+    import mcp_gmail.gmail_tools.message_text as mt
+
+    def _boom(_html):
+        raise ValueError("simulated bs4 parse explosion")
+
+    monkeypatch.setattr(mt, "_md", _boom)
+
+    message = {
+        "id": "MBOOM",
+        "payload": {
+            "mimeType": "text/html",
+            "headers": _headers(("Content-Type", "text/html; charset=utf-8")),
+            "body": {"data": _b64url("<p>hi</p>")},
+        },
+    }
+
+    lean = extract_lean_message(message)
+
+    assert lean["text_source"] == "text/html"
+    assert lean["text"] == ""
+
+
+# ---------------------------------------------------------------------------
+# FIX-3: defensive text cap
+# ---------------------------------------------------------------------------
+
+
+def test_text_over_cap_is_truncated_with_marker_and_flag():
+    """A text/plain body over MAX_TEXT_CHARS is truncated to the cap, a marker
+    naming the omitted count is appended, and text_truncated is True."""
+    over = 12345
+    body = "x" * (MAX_TEXT_CHARS + over)
+    message = {
+        "id": "MBIG",
+        "payload": {
+            "mimeType": "text/plain",
+            "headers": _headers(("Content-Type", "text/plain; charset=utf-8")),
+            "body": {"data": _b64url(body)},
+        },
+    }
+
+    lean = extract_lean_message(message)
+
+    assert lean["text_truncated"] is True
+    assert lean["text"].startswith("x" * MAX_TEXT_CHARS)
+    assert "[text truncated:" in lean["text"]
+    assert f"{over} characters omitted" in lean["text"]
+    # The retained body is exactly the cap (the marker is appended after).
+    assert lean["text"][:MAX_TEXT_CHARS] == "x" * MAX_TEXT_CHARS
+
+
+def test_text_at_or_under_cap_is_unchanged_and_no_flag():
+    """A normal body (<= cap) is returned verbatim with no text_truncated
+    field present."""
+    body = "normal receipt body, a few chars"
+    message = {
+        "id": "MSMALL",
+        "payload": {
+            "mimeType": "text/plain",
+            "headers": _headers(("Content-Type", "text/plain; charset=utf-8")),
+            "body": {"data": _b64url(body)},
+        },
+    }
+
+    lean = extract_lean_message(message)
+
+    assert lean["text"] == body
+    assert "text_truncated" not in lean
+
+
+def test_text_exactly_at_cap_is_not_truncated():
+    """Boundary: len(text) == MAX_TEXT_CHARS is NOT truncated (<= is the gate)."""
+    body = "y" * MAX_TEXT_CHARS
+    message = {
+        "id": "MEXACT",
+        "payload": {
+            "mimeType": "text/plain",
+            "headers": _headers(("Content-Type", "text/plain; charset=utf-8")),
+            "body": {"data": _b64url(body)},
+        },
+    }
+
+    lean = extract_lean_message(message)
+
+    assert lean["text"] == body
+    assert "text_truncated" not in lean
+
+
+# ---------------------------------------------------------------------------
+# FIX-2: safe_extract_lean_message fault isolation (helper level)
+# ---------------------------------------------------------------------------
+
+
+def test_safe_extract_degrades_on_unexpected_failure(monkeypatch):
+    """safe_extract_lean_message degrades a message to a minimal lean entry
+    if extract_lean_message raises unexpectedly (defense-in-depth), rather
+    than propagating."""
+    import mcp_gmail.gmail_tools.message_text as mt
+
+    def _boom(_msg):
+        raise RuntimeError("unexpected extraction failure")
+
+    monkeypatch.setattr(mt, "extract_lean_message", _boom)
+
+    entry = safe_extract_lean_message({"id": "mX", "threadId": "tX"})
+
+    assert entry["id"] == "mX"
+    assert entry["threadId"] == "tX"
+    assert entry["text"] == ""
+    assert entry["text_source"] == "none"
+    assert entry["attachments"] == []
+    assert entry["headers"] == {}
+
+
+def test_safe_extract_passes_through_normal_message():
+    """safe_extract_lean_message returns the full lean shape on a normal
+    message (the wrapper is transparent on the happy path)."""
+    body = "hello thread message"
+    message = {
+        "id": "mOK",
+        "threadId": "tOK",
+        "payload": {
+            "mimeType": "text/plain",
+            "headers": _headers(("Content-Type", "text/plain; charset=utf-8")),
+            "body": {"data": _b64url(body)},
+        },
+    }
+
+    entry = safe_extract_lean_message(message)
+
+    assert entry["text"] == body
+    assert entry["text_source"] == "text/plain"

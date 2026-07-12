@@ -12,7 +12,7 @@ lean shape is a few KB.
 
 Body-selection rules
 --------------------
-Walk the payload parts recursively (bounded depth, see below):
+Walk the payload parts recursively (bounded depth):
 
 1. Prefer the first `text/plain` part: decode its `body.data`
    (base64url) using the part's declared charset (from its
@@ -25,175 +25,69 @@ Walk the payload parts recursively (bounded depth, see below):
 3. If neither exists (e.g. attachment-only), return `text == ""`
    with `text_source == "none"`.
 
-This module owns its OWN parts-walk and attachment-metadata walk. It
-deliberately does NOT import `attachment_download._enumerate_attachment_parts`
-(private, `size`-less, and on the attachment path this feature must not
-touch); the depth-guard PATTERN (bounded recursion against a
-sender-influenced MIME tree) is reused, not the symbol.
+The low-level walk + decode primitives live in message_text_parts.py
+(split out under the 300-LOC / distinct-responsibility rule); this
+module owns the public lean-shape orchestration: the markdownify HTML
+fallback (which must never crash the read), the defensive text cap, and
+the per-message fault isolation used by get_thread. This module owns its
+OWN parts-walk (in message_text_parts) and does NOT touch the attachment
+download path.
 
-Charset handling
-----------------
-Gmail returns each part's `mimeType` (e.g. "text/plain") but the
-charset lives on the raw part headers as `Content-Type:
-text/plain; charset="iso-8859-1"`. We read the part's `headers` list
-for Content-Type and parse the charset param. Unknown/absent charset
--> utf-8. Any decode failure falls back to utf-8 with
-`errors="replace"` so a mislabeled part never crashes the read.
+Robustness contract
+-------------------
+extract_lean_message NEVER raises on hostile input:
+- Hostile MIME nesting is bounded by the depth guards in
+  message_text_parts.
+- Hostile HTML (deeply-nested DOM that makes markdownify recurse, or any
+  bs4/markdownify parse failure) is caught and degrades to empty text
+  while keeping text_source='text/html'.
+- A pathological multi-MB text body is capped at MAX_TEXT_CHARS.
+safe_extract_lean_message adds per-message fault isolation for the
+thread walk so one bad message cannot fail the whole get_thread read.
 """
 
 from __future__ import annotations
 
-import base64
-from email.message import Message
+import logging
 from typing import Any
 
 from markdownify import markdownify as _md
 
-
-# Maximum MIME nesting depth the walkers descend before stopping. The
-# payload tree is sender-influenced, so an unbounded recursive walk over
-# a pathologically deep message could raise RecursionError. 100 is far
-# above any real Gmail message yet far below Python's default ~1000
-# recursion limit. Mirrors the bounded-recursion guard pattern in
-# attachment_download.py (the pattern is reused; the symbol is not).
-_MAX_MIME_DEPTH = 100
-
-# Curated header set surfaced in the lean shape. Match is
-# case-insensitive against Gmail's payload.headers; the OUTPUT key uses
-# the canonical casing below. Absent headers are OMITTED (no null
-# placeholders) to keep the object lean.
-_CURATED_HEADERS: tuple[str, ...] = (
-    "From",
-    "To",
-    "Cc",
-    "Bcc",
-    "Subject",
-    "Date",
-    "Reply-To",
-    "Message-ID",
+from .message_text_parts import (
+    _collect_attachments,
+    _curate_headers,
+    _decode_part_text,
+    _find_body_parts,
 )
-_CURATED_LOOKUP: dict[str, str] = {h.lower(): h for h in _CURATED_HEADERS}
+
+logger = logging.getLogger(__name__)
 
 
-def _charset_from_part(part: dict[str, Any]) -> str:
-    """Return the declared charset for a part, defaulting to utf-8.
+# Defensive cap on the FINAL `text` field (from text/plain or converted
+# HTML). format='text' exists to keep output under the MCP token cap;
+# without a length ceiling a pathological multi-MB text/plain body would
+# defeat that. Normal receipts are a few KB, well under this. Over the
+# cap, `text` is truncated and a marker is appended; `text_truncated` is
+# set True on the lean object. Todd can tune this default later.
+MAX_TEXT_CHARS = 100_000
 
-    Gmail exposes the charset only on the raw `Content-Type` header
-    (e.g. `text/plain; charset="iso-8859-1"`), not as a top-level
-    field. We parse it with email.message.Message so quoted and
-    unquoted param forms are both handled. Absent/blank -> "utf-8".
+_TRUNCATION_MARKER = (
+    "\n\n[text truncated: {omitted} characters omitted; use format=full "
+    "or download the message for the full body]"
+)
+
+
+def _cap_text(text: str) -> tuple[str, bool]:
+    """Apply MAX_TEXT_CHARS to the final text. Returns (text, truncated).
+
+    Under the cap the text is returned unchanged with truncated=False.
+    Over the cap it is truncated to MAX_TEXT_CHARS and the marker
+    (naming the omitted-character count) is appended; truncated=True.
     """
-    for h in part.get("headers") or []:
-        if (h.get("name") or "").lower() == "content-type":
-            probe = Message()
-            probe["Content-Type"] = h.get("value") or ""
-            charset = probe.get_content_charset()
-            if charset:
-                return charset
-            break
-    return "utf-8"
-
-
-def _decode_part_text(part: dict[str, Any]) -> str:
-    """Decode a text part's base64url `body.data` using its charset.
-
-    base64url decode is padding-tolerant (Gmail strips padding). The
-    bytes are decoded with the declared charset; ANY failure (unknown
-    codec or invalid bytes for the codec) falls back to utf-8 with
-    `errors="replace"` so a mislabeled part yields best-effort text
-    rather than crashing the read.
-    """
-    data = ((part.get("body") or {}).get("data")) or ""
-    if not data:
-        return ""
-    raw = base64.urlsafe_b64decode(data + "=" * (-len(data) % 4))
-    charset = _charset_from_part(part)
-    try:
-        return raw.decode(charset, errors="replace")
-    except (LookupError, TypeError):
-        # Unknown codec name (LookupError) or non-str charset: fall back.
-        return raw.decode("utf-8", errors="replace")
-
-
-def _find_body_parts(payload: dict[str, Any]) -> tuple[dict | None, dict | None]:
-    """Depth-first preorder walk returning (first text/plain, first text/html).
-
-    Returns the first text/plain part and the first text/html part
-    encountered in document order (either may be None). Bounded at
-    `_MAX_MIME_DEPTH`; a tree deeper than the guard simply stops
-    descending that branch (no exception: the lean read degrades to
-    whatever body it already found rather than failing).
-    """
-    plain: dict | None = None
-    html: dict | None = None
-
-    def _walk(part: dict[str, Any], depth: int) -> None:
-        nonlocal plain, html
-        if depth > _MAX_MIME_DEPTH or not isinstance(part, dict):
-            return
-        mime = (part.get("mimeType") or "").lower()
-        if mime == "text/plain" and plain is None:
-            plain = part
-        elif mime == "text/html" and html is None:
-            html = part
-        for child in part.get("parts") or []:
-            _walk(child, depth + 1)
-
-    if isinstance(payload, dict):
-        _walk(payload, 0)
-    return plain, html
-
-
-def _collect_attachments(payload: dict[str, Any]) -> list[dict[str, Any]]:
-    """Walk the payload and return attachment METADATA (no bytes).
-
-    An entry is emitted for every part with a `body.attachmentId`
-    (server-side downloadable reference), in document order. Each is
-    `{filename, mime_type, size, attachment_id}`; `filename` is None
-    for nameless inline parts (they remain reachable by attachment_id).
-    Bounded at `_MAX_MIME_DEPTH`.
-    """
-    out: list[dict[str, Any]] = []
-
-    def _walk(part: dict[str, Any], depth: int) -> None:
-        if depth > _MAX_MIME_DEPTH or not isinstance(part, dict):
-            return
-        body = part.get("body") or {}
-        attachment_id = body.get("attachmentId")
-        if attachment_id:
-            out.append(
-                {
-                    "filename": part.get("filename") or None,
-                    "mime_type": part.get("mimeType"),
-                    "size": body.get("size"),
-                    "attachment_id": attachment_id,
-                }
-            )
-        for child in part.get("parts") or []:
-            _walk(child, depth + 1)
-
-    if isinstance(payload, dict):
-        _walk(payload, 0)
-    return out
-
-
-def _curate_headers(payload: dict[str, Any]) -> dict[str, str]:
-    """Pull the curated header set from payload.headers (omit-if-absent).
-
-    Case-insensitive match against Gmail's header names; the output key
-    uses the canonical casing in `_CURATED_HEADERS`. Absent headers are
-    omitted (no null placeholders). First occurrence wins if a header
-    repeats.
-    """
-    out: dict[str, str] = {}
-    for h in payload.get("headers") or []:
-        name = (h.get("name") or "").lower()
-        canonical = _CURATED_LOOKUP.get(name)
-        if canonical and canonical not in out:
-            value = h.get("value")
-            if value is not None:
-                out[canonical] = value
-    return out
+    if len(text) <= MAX_TEXT_CHARS:
+        return text, False
+    omitted = len(text) - MAX_TEXT_CHARS
+    return text[:MAX_TEXT_CHARS] + _TRUNCATION_MARKER.format(omitted=omitted), True
 
 
 def _extract_text(payload: dict[str, Any]) -> tuple[str, str]:
@@ -209,10 +103,26 @@ def _extract_text(payload: dict[str, Any]) -> tuple[str, str]:
         return _decode_part_text(plain), "text/plain"
     if html is not None:
         raw_html = _decode_part_text(html)
-        # markdownify with defaults; strip nothing extra beyond its
-        # built-in script/style handling. `.strip()` trims the leading/
-        # trailing whitespace markdownify tends to leave around blocks.
-        return _md(raw_html).strip(), "text/html"
+        # markdownify walks the HTML DOM recursively (one stack frame per
+        # node), so pathologically-nested hostile HTML can raise
+        # RecursionError; the depth guards in message_text_parts bound the
+        # MIME-parts tree, NOT HTML-DOM depth. Any bs4/markdownify parse
+        # failure on hostile HTML must not crash the read (this module's
+        # contract is "never crashes the read"). Degrade to empty text
+        # while keeping text_source='text/html' so the caller still learns
+        # HTML was present but could not be converted. RecursionError is
+        # caught explicitly (a bare `Exception` would miss it). The HTML
+        # content is NEVER logged (no PII on the wire).
+        try:
+            # `.strip()` trims the leading/trailing whitespace markdownify
+            # tends to leave around blocks.
+            return _md(raw_html).strip(), "text/html"
+        except RecursionError:
+            logger.warning("markdownify RecursionError on hostile HTML; degrading to empty text")
+            return "", "text/html"
+        except Exception:  # noqa: BLE001 - hostile-HTML parse failures must not crash the read
+            logger.warning("markdownify failed to convert HTML; degrading to empty text")
+            return "", "text/html"
     return "", "none"
 
 
@@ -225,6 +135,7 @@ def extract_lean_message(message: dict[str, Any]) -> dict[str, Any]:
           "headers": {curated present headers, canonical-cased},
           "text": "<decoded plain-text body>",
           "text_source": "text/plain" | "text/html" | "none",
+          "text_truncated": true,   # ONLY present when the cap fired
           "attachments": [
             {"filename", "mime_type", "size", "attachment_id"}  # no bytes
           ]
@@ -232,10 +143,15 @@ def extract_lean_message(message: dict[str, Any]) -> dict[str, Any]:
 
     The full payload, HTML part, and inline base64 are intentionally
     dropped: the lean object is a few KB even for a 200KB HTML receipt.
+    The final `text` is capped at MAX_TEXT_CHARS (truncated with a
+    marker + `text_truncated: true`) so the output stays manageable even
+    for a pathological multi-MB text/plain body. `text_truncated` is
+    omitted when the text is within the cap.
     """
     payload = message.get("payload") or {}
     text, text_source = _extract_text(payload)
-    return {
+    text, truncated = _cap_text(text)
+    lean: dict[str, Any] = {
         "id": message.get("id"),
         "threadId": message.get("threadId"),
         "labelIds": message.get("labelIds") or [],
@@ -245,3 +161,32 @@ def extract_lean_message(message: dict[str, Any]) -> dict[str, Any]:
         "text_source": text_source,
         "attachments": _collect_attachments(payload),
     }
+    if truncated:
+        lean["text_truncated"] = True
+    return lean
+
+
+def safe_extract_lean_message(message: dict[str, Any]) -> dict[str, Any]:
+    """Fault-isolated `extract_lean_message` for the per-message thread walk.
+
+    extract_lean_message is already non-raising on hostile HTML (see
+    _extract_text) and on hostile MIME nesting (the depth guards), so
+    this wrapper is defense-in-depth: ANY unexpected per-message failure
+    degrades THAT message to a minimal lean entry instead of failing the
+    whole get_thread read. One malformed message in a thread must not
+    -32603 the entire thread. The message content is NEVER logged.
+    """
+    try:
+        return extract_lean_message(message)
+    except Exception:  # noqa: BLE001 - one bad message must not fail the whole thread read
+        logger.warning("extract_lean_message failed for a thread message; degrading that entry")
+        return {
+            "id": message.get("id") if isinstance(message, dict) else None,
+            "threadId": message.get("threadId") if isinstance(message, dict) else None,
+            "labelIds": [],
+            "snippet": None,
+            "headers": {},
+            "text": "",
+            "text_source": "none",
+            "attachments": [],
+        }
