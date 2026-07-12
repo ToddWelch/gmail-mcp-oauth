@@ -29,10 +29,20 @@ from .errors import bad_request_error, upstream_error
 from .gmail_client import GmailApiError, GmailClient
 from .idempotency import IdempotencyCache, default_cache
 from .message_format import (
+    InvalidHeaderValue,
     OversizeMessage,
     build_email_message,
     message_to_base64url,
 )
+from .reply_recipients import extract_header, looks_like_email, split_address_list
+
+# Backward-compat re-exports. The recipient-computation helpers moved to
+# reply_recipients.py (300-LOC split); existing references to
+# `reply._split_address_list` / `reply._extract_header` /
+# `reply._looks_like_email` keep resolving here.
+_split_address_list = split_address_list
+_extract_header = extract_header
+_looks_like_email = looks_like_email
 
 logger = logging.getLogger(__name__)
 
@@ -43,68 +53,6 @@ logger = logging.getLogger(__name__)
 # tool surface keeps the contract symmetric with send_email's
 # explicit recipient lists.
 _MAX_EXPANDED_RECIPIENTS = 100
-
-
-def _split_address_list(value: str | None) -> list[str]:
-    """Split a comma-separated address header into individual entries.
-
-    RFC 5322 address lists are comma-separated and may include angle-
-    bracketed forms ("Name <addr@host>"). For reply_all we only need
-    the bare addresses. We extract the angle-bracketed value when
-    present, otherwise use the trimmed value. Empty or None header
-    yields an empty list.
-    """
-    if not value:
-        return []
-    out: list[str] = []
-    for piece in value.split(","):
-        piece = piece.strip()
-        if not piece:
-            continue
-        if "<" in piece and ">" in piece:
-            start = piece.find("<")
-            end = piece.find(">", start)
-            if end > start:
-                bare = piece[start + 1 : end].strip()
-                if bare:
-                    out.append(bare)
-                    continue
-        out.append(piece)
-    return out
-
-
-def _extract_header(message: dict[str, Any], name: str) -> str | None:
-    """Return the value of header `name` from a Gmail message payload, or None.
-
-    Gmail's `payload.headers` is a list of {name, value} dicts. The
-    name match is case-insensitive per RFC 5322. Returns the first
-    match; duplicate header names (legal for some headers) are
-    ignored beyond the first.
-    """
-    payload = message.get("payload")
-    if not isinstance(payload, dict):
-        return None
-    headers = payload.get("headers")
-    if not isinstance(headers, list):
-        return None
-    target = name.lower()
-    for h in headers:
-        if not isinstance(h, dict):
-            continue
-        hname = h.get("name")
-        if isinstance(hname, str) and hname.lower() == target:
-            v = h.get("value")
-            return v if isinstance(v, str) else None
-    return None
-
-
-def _looks_like_email(addr: str) -> bool:
-    if not isinstance(addr, str):
-        return False
-    if addr.count("@") != 1:
-        return False
-    local, _, domain = addr.partition("@")
-    return bool(local) and bool(domain)
 
 
 # ---------------------------------------------------------------------------
@@ -179,18 +127,18 @@ async def reply_all(
     self_email_lower = self_email.strip().lower()
 
     # ---- compute recipients -----------------------------------------------
-    from_header = _extract_header(original, "From") or ""
-    to_header = _extract_header(original, "To")
-    cc_header = _extract_header(original, "Cc")
-    subject_header = _extract_header(original, "Subject") or ""
-    message_id_header = _extract_header(original, "Message-ID") or _extract_header(
+    from_header = extract_header(original, "From") or ""
+    to_header = extract_header(original, "To")
+    cc_header = extract_header(original, "Cc")
+    subject_header = extract_header(original, "Subject") or ""
+    message_id_header = extract_header(original, "Message-ID") or extract_header(
         original, "Message-Id"
     )
-    references_header = _extract_header(original, "References")
+    references_header = extract_header(original, "References")
 
-    from_addrs = _split_address_list(from_header)
-    to_addrs = _split_address_list(to_header)
-    cc_addrs = _split_address_list(cc_header)
+    from_addrs = split_address_list(from_header)
+    to_addrs = split_address_list(to_header)
+    cc_addrs = split_address_list(cc_header)
 
     # Build the new recipient sets.
     reply_to: list[str] = []
@@ -205,7 +153,7 @@ async def reply_all(
         if key in seen:
             continue
         seen.add(key)
-        if _looks_like_email(addr):
+        if looks_like_email(addr):
             reply_to.append(addr)
 
     reply_cc: list[str] = []
@@ -216,7 +164,7 @@ async def reply_all(
         if key in seen:
             continue
         seen.add(key)
-        if _looks_like_email(addr):
+        if looks_like_email(addr):
             reply_cc.append(addr)
 
     # Cap the expanded set. We cap on the combined size; the tool
@@ -275,6 +223,12 @@ async def reply_all(
         )
     except OversizeMessage as exc:
         return bad_request_error(str(exc))
+    except InvalidHeaderValue as exc:
+        # Control character in a specific header field (e.g. a CR/LF-bearing
+        # address expanded from the original message); typed, field-named
+        # bad_request, no consume. Never log the value.
+        logger.warning("reply_all rejected a control character in a header field")
+        return bad_request_error(f"{exc.field} contains control characters")
     except ValueError:
         # Malformed header/attachment value raises in EmailMessage; bad_request, no consume.
         logger.warning("reply_all message build rejected a malformed header/attachment value")

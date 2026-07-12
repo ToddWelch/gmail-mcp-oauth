@@ -46,6 +46,7 @@ from .errors import bad_request_error
 from .gmail_client import GmailClient
 from .idempotency import IdempotencyCache, default_cache
 from .message_format import (
+    InvalidHeaderValue,
     OversizeMessage,
     build_email_message,
     message_to_base64url,
@@ -187,6 +188,11 @@ async def send_email(
         )
     except OversizeMessage as exc:
         return bad_request_error(str(exc))
+    except InvalidHeaderValue as exc:
+        # A control character in a specific header field. Typed, field-named
+        # bad_request (BEFORE consume, no slot burned). Never log the value.
+        logger.warning("send_email rejected a control character in a header field")
+        return bad_request_error(f"{exc.field} contains control characters")
     except ValueError:
         # A malformed caller-supplied header/attachment value (e.g. CR/LF in
         # a filename or mime_type that slipped past proactive checks) makes

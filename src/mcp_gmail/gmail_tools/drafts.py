@@ -29,6 +29,7 @@ from .errors import bad_request_error, not_found_error
 from .gmail_client import GmailApiError, GmailClient
 from .message_format import (
     Attachment,
+    InvalidHeaderValue,
     OversizeMessage,
     build_email_message,
     message_to_base64url,
@@ -65,6 +66,12 @@ def _build_raw_message(
         )
     except OversizeMessage as exc:
         return bad_request_error(str(exc))
+    except InvalidHeaderValue as exc:
+        # Control character in a specific header field (covers both
+        # create_draft and update_draft, which route through here). Typed,
+        # field-named bad_request BEFORE any consume. Never log the value.
+        logger.warning("draft build rejected a control character in a header field")
+        return bad_request_error(f"{exc.field} contains control characters")
     except ValueError:
         # A malformed caller-supplied header/attachment value (e.g. CR/LF in
         # a filename or mime_type that slipped past proactive checks) makes
