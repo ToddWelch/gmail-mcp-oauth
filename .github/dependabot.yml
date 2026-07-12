@@ -29,3 +29,15 @@ updates:
       github-actions:
         patterns:
           - "*"
+
+  # Base image in mcp.Dockerfile. Dependabot's docker ecosystem discovers
+  # *.Dockerfile in the target directory and opens PRs bumping the pinned
+  # FROM digest. Newer base digests carry fixed build tooling
+  # (pip/setuptools/wheel and vendored deps like jaraco.*), which is why the
+  # Trivy image scan gates the OS layer only and leaves base-image Python
+  # tooling to flow in through these digest-bump PRs instead of a hard gate.
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
