@@ -58,6 +58,69 @@ class OversizeMessage(Exception):
         self.max_size = max_size
 
 
+class InvalidHeaderValue(Exception):
+    """Raised when a header field carries control characters.
+
+    Carries the offending `field` name (e.g. "subject", "to[1]") so the
+    calling tool can return a SPECIFIC bad_request naming the field,
+    rather than the generic build-ValueError backstop. A CR/LF in a
+    header enables header injection and makes EmailMessage raise at
+    render time; catching it proactively keeps the error typed and the
+    message unbuilt.
+    """
+
+    def __init__(self, field: str):
+        super().__init__(f"{field} contains control characters")
+        self.field = field
+
+
+def is_safe_header_value(value: str) -> bool:
+    """True if `value` is free of C0 (<0x20), DEL/C1 (0x7F-0x9F), and NUL.
+
+    Shared control-character predicate for outbound header fields and
+    attachment filename/mime (attachment_input re-exposes it as
+    is_safe_filename / is_safe_mime). CR/LF/NUL enable MIME- and
+    header-injection and make EmailMessage raise at render time; the
+    whole control range is rejected before build rather than crashing
+    with a generic error. An empty string is safe here (emptiness is a
+    separate, field-specific concern); callers that require non-empty
+    check that themselves.
+    """
+    return not any(ord(c) < 0x20 or 0x7F <= ord(c) <= 0x9F for c in value)
+
+
+def _validate_header_fields(
+    *,
+    sender: str,
+    to: list[str],
+    subject: str,
+    cc: list[str] | None,
+    bcc: list[str] | None,
+    reply_to_message_id: str | None,
+    reply_to_references: list[str] | None,
+) -> None:
+    """Reject control characters in every caller-supplied header field.
+
+    Raises InvalidHeaderValue(field) naming the first offending field.
+    Recipients are checked per-index (e.g. "to[2]") so an address like
+    `a@b\\nX-Bad: y` -- which passes a naive single-@ check -- is caught
+    here before it can inject a header.
+    """
+    if not is_safe_header_value(subject):
+        raise InvalidHeaderValue("subject")
+    if not is_safe_header_value(sender):
+        raise InvalidHeaderValue("sender")
+    for field, addrs in (("to", to), ("cc", cc), ("bcc", bcc)):
+        for i, addr in enumerate(addrs or []):
+            if not is_safe_header_value(addr):
+                raise InvalidHeaderValue(f"{field}[{i}]")
+    if reply_to_message_id is not None and not is_safe_header_value(reply_to_message_id):
+        raise InvalidHeaderValue("reply_to_message_id")
+    for i, ref in enumerate(reply_to_references or []):
+        if not is_safe_header_value(ref):
+            raise InvalidHeaderValue(f"reply_to_references[{i}]")
+
+
 # ---------------------------------------------------------------------------
 # Inputs
 # ---------------------------------------------------------------------------
@@ -118,6 +181,20 @@ def build_email_message(
     the caller can re-render at send time without functional change
     (EmailMessage rendering is deterministic for the same instance).
     """
+    # Proactive per-field control-char rejection BEFORE any header is
+    # assigned. Raises InvalidHeaderValue(field) so the calling tool can
+    # return a SPECIFIC bad_request naming the field; the generic build
+    # ValueError in each tool remains the backstop for anything else.
+    _validate_header_fields(
+        sender=sender,
+        to=to,
+        subject=subject,
+        cc=cc,
+        bcc=bcc,
+        reply_to_message_id=reply_to_message_id,
+        reply_to_references=reply_to_references,
+    )
+
     msg = EmailMessage()
     msg["From"] = sender
     msg["To"] = ", ".join(to)

@@ -260,11 +260,12 @@ async def test_create_draft_oversize_build_does_not_burn_slot(client):
 # FIX-C: malformed header value at build -> typed bad_request, never a 500
 # ---------------------------------------------------------------------------
 
-_BUILD_ERR_MSG = "message could not be built from the provided headers/attachments"
-# CR/LF in reply_to_references slips past the attachment proactive checks
-# (they guard filename/mime, not references) and makes build_email_message
-# raise ValueError.
+# CR/LF in reply_to_references[0]. Proactive per-field validation in
+# build_email_message now catches this and raises InvalidHeaderValue,
+# yielding a SPECIFIC field-named error (previously the generic build
+# ValueError). The single element means the offending field is index 0.
 _BAD_REFS = ["ref\r\nX-Injected: y"]
+_BAD_REFS_ERR_MSG = "reply_to_references[0] contains control characters"
 
 
 @pytest.mark.asyncio
@@ -291,7 +292,8 @@ async def test_send_email_malformed_header_maps_to_bad_request_no_consume(client
         )
     assert route.call_count == 0  # build failed -> NO send
     assert r["code"] == ToolErrorCode.BAD_REQUEST
-    assert r["message"] == _BUILD_ERR_MSG  # the FIX-C path (not oversize/other)
+    # Specific field-named error (proactive validation), still BEFORE consume.
+    assert r["message"] == _BAD_REFS_ERR_MSG
     assert _consumable(token)  # slot NOT burned
 
 
@@ -314,5 +316,6 @@ async def test_create_draft_malformed_header_maps_to_bad_request_no_consume(clie
         )
     assert route.call_count == 0  # build failed -> NO draft POST
     assert r["code"] == ToolErrorCode.BAD_REQUEST
-    assert r["message"] == _BUILD_ERR_MSG
+    # Specific field-named error (proactive validation), still BEFORE consume.
+    assert r["message"] == _BAD_REFS_ERR_MSG
     assert _consumable(token)  # slot NOT burned

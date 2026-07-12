@@ -205,8 +205,9 @@ async def test_reply_all_empty_recipients_returns_bad_request(client):
 
 @pytest.mark.asyncio
 async def test_reply_all_malformed_header_maps_to_bad_request(client):
-    """A source message whose Subject carries CR/LF makes build_email_message
-    raise ValueError; reply_all maps it to a typed bad_request (not a raw 500)
+    """A source message whose Subject carries CR/LF is caught by the proactive
+    per-field validation in build_email_message (InvalidHeaderValue("subject"));
+    reply_all maps it to a SPECIFIC, field-named bad_request (not a raw 500)
     and never calls the send endpoint."""
 
     def get_handler(request: httpx.Request) -> httpx.Response:
@@ -240,7 +241,10 @@ async def test_reply_all_malformed_header_maps_to_bad_request(client):
         assert send_route.called is False  # build failed -> NO send
 
     assert r["code"] == ToolErrorCode.BAD_REQUEST
-    assert r["message"] == "message could not be built from the provided headers/attachments"
+    # Now a SPECIFIC field-named error (was the generic build message before
+    # proactive per-field validation): the offending Subject expands from the
+    # source message into the reply subject and is rejected by field name.
+    assert r["message"] == "subject contains control characters"
 
 
 # ---------------------------------------------------------------------------

@@ -257,6 +257,48 @@ async def test_send_email_rejects_non_email_in_cc(client):
     assert r["code"] == ToolErrorCode.BAD_REQUEST
 
 
+@pytest.mark.asyncio
+async def test_send_email_rejects_control_char_recipient_specific_error(client):
+    """A recipient with a SINGLE @ but a CR/LF (e.g. header injection) passes the
+    syntactic _looks_like_email check yet is caught by proactive per-field
+    validation: a SPECIFIC field-named bad_request, and NO Gmail call."""
+    with respx.mock(base_url=GMAIL_API_BASE, assert_all_called=False) as router:
+        any_route = router.route()
+        any_route.mock(return_value=httpx.Response(200, json={"id": "x"}))
+        r = await send.send_email(
+            client=client,
+            auth0_sub="u",
+            account_email="me@x.com",
+            sender="me@x.com",
+            to=["ok@x.com", "a@b.com\r\nX-Injected: y"],
+            subject="s",
+            body_text="b",
+        )
+        assert any_route.called is False  # build validation fired -> NO send
+    assert r["code"] == ToolErrorCode.BAD_REQUEST
+    assert r["message"] == "to[1] contains control characters"
+
+
+@pytest.mark.asyncio
+async def test_send_email_rejects_control_char_subject_specific_error(client):
+    """A CR/LF in the subject yields the specific 'subject' bad_request, no send."""
+    with respx.mock(base_url=GMAIL_API_BASE, assert_all_called=False) as router:
+        any_route = router.route()
+        any_route.mock(return_value=httpx.Response(200, json={"id": "x"}))
+        r = await send.send_email(
+            client=client,
+            auth0_sub="u",
+            account_email="me@x.com",
+            sender="me@x.com",
+            to=["y@x.com"],
+            subject="Hello\r\nX-Injected: y",
+            body_text="b",
+        )
+        assert any_route.called is False
+    assert r["code"] == ToolErrorCode.BAD_REQUEST
+    assert r["message"] == "subject contains control characters"
+
+
 # ---------------------------------------------------------------------------
 # Audit log discipline
 # ---------------------------------------------------------------------------

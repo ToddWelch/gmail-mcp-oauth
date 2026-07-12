@@ -13,8 +13,10 @@ import pytest
 from mcp_gmail.gmail_tools.message_format import (
     MAX_ENCODED_BYTES,
     Attachment,
+    InvalidHeaderValue,
     OversizeMessage,
     build_email_message,
+    is_safe_header_value,
     message_to_base64url,
 )
 
@@ -234,3 +236,85 @@ def test_oversize_at_max_plus_one_byte_raises(monkeypatch):
     # is to verify the comparison fires; the `encoded_size` field is
     # the one that reflects the actual measurement.
     assert exc_info.value.encoded_size == exact_size
+
+
+# ---------------------------------------------------------------------------
+# Proactive per-field control-char validation (InvalidHeaderValue)
+# ---------------------------------------------------------------------------
+
+
+def _base_kwargs(**overrides):
+    """Valid build_email_message kwargs; overrides replace individual fields."""
+    kwargs = {
+        "sender": "me@example.com",
+        "to": ["you@example.com"],
+        "subject": "hi",
+        "body_text": "body",
+    }
+    kwargs.update(overrides)
+    return kwargs
+
+
+@pytest.mark.parametrize(
+    "overrides, expected_field",
+    [
+        # subject
+        (dict(subject="Hello\r\nX-Injected: y"), "subject"),
+        (dict(subject="null\x00byte"), "subject"),
+        # sender
+        (dict(sender="me@example.com\r\nBcc: evil@x.com"), "sender"),
+        # recipients: per-index field names. The address has a SINGLE @, so a
+        # naive _looks_like_email check would pass it; validation must not.
+        (dict(to=["ok@example.com", "a@b\nX-Bad: y"]), "to[1]"),
+        (dict(to=["x@y.com"], cc=["bad\r\n@z.com"]), "cc[0]"),
+        (dict(to=["x@y.com"], bcc=["a@b.com", "c@d.com", "e@f\x1f.com"]), "bcc[2]"),
+        # threading headers
+        (dict(reply_to_message_id="<id\r\n@x>"), "reply_to_message_id"),
+        (
+            dict(reply_to_message_id="<ok@x>", reply_to_references=["<ok@x>", "<bad\n@y>"]),
+            "reply_to_references[1]",
+        ),
+    ],
+)
+def test_control_char_in_each_field_raises_invalid_header_value(overrides, expected_field):
+    """A control char in ANY validated field raises InvalidHeaderValue naming
+    that field, and no message is built (the exception fires before assembly)."""
+    with pytest.raises(InvalidHeaderValue) as exc_info:
+        build_email_message(**_base_kwargs(**overrides))
+    assert exc_info.value.field == expected_field
+    assert str(exc_info.value) == f"{expected_field} contains control characters"
+
+
+def test_clean_header_values_still_build():
+    """Normal values across every field build without raising."""
+    msg = build_email_message(
+        **_base_kwargs(
+            subject="Quarterly report",
+            sender="alice@example.com",
+            to=["bob@example.com"],
+            cc=["carol@example.com"],
+            bcc=["dave@example.com"],
+            reply_to_message_id="<parent@example.com>",
+            reply_to_references=["<root@example.com>", "<parent@example.com>"],
+        )
+    )
+    assert msg["Subject"] == "Quarterly report"
+    assert msg["To"] == "bob@example.com"
+
+
+@pytest.mark.parametrize(
+    "value, safe",
+    [
+        ("clean-value", True),
+        ("", True),  # emptiness is a separate, field-specific concern
+        ("with space and unicode café", True),
+        ("carriage\rreturn", False),
+        ("line\nfeed", False),
+        ("null\x00", False),
+        ("del\x7f", False),
+        ("c1\x9f", False),
+    ],
+)
+def test_is_safe_header_value_char_class(value, safe):
+    """The shared predicate rejects exactly C0 (<0x20), DEL/C1 (0x7F-0x9F)."""
+    assert is_safe_header_value(value) is safe

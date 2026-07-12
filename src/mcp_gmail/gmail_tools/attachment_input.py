@@ -17,7 +17,7 @@ import binascii
 from typing import Any
 
 from .errors import bad_request_error
-from .message_format import MAX_ENCODED_BYTES, Attachment
+from .message_format import MAX_ENCODED_BYTES, Attachment, is_safe_header_value
 
 
 # Pre-decode attachment count cap. Matches the count Gmail's UI exposes
@@ -31,9 +31,11 @@ def is_safe_filename(name: str) -> bool:
     EmailMessage.add_attachment raises ValueError on CR/LF in a filename,
     and CR/LF/NUL enable MIME-header injection; reject them (and the rest
     of the control range) before storing or building rather than crashing
-    at render time.
+    at render time. The control-char class is the shared
+    message_format.is_safe_header_value predicate; the non-empty
+    requirement is filename-specific.
     """
-    return bool(name) and not any(ord(c) < 0x20 or 0x7F <= ord(c) <= 0x9F for c in name)
+    return bool(name) and is_safe_header_value(name)
 
 
 def is_safe_mime(value: str) -> bool:
@@ -43,9 +45,10 @@ def is_safe_mime(value: str) -> bool:
     Content-Type. EmailMessage.add_attachment raises ValueError on CR/LF in
     the maintype/subtype, and CR/LF/NUL enable MIME-header injection; reject
     the whole control range before storing or building rather than crashing
-    at render time with a generic 500.
+    at render time with a generic 500. Delegates the control-char class to
+    message_format.is_safe_header_value; the non-empty check is mime-specific.
     """
-    return bool(value) and not any(ord(c) < 0x20 or 0x7F <= ord(c) <= 0x9F for c in value)
+    return bool(value) and is_safe_header_value(value)
 
 
 def _validate_attachments_pre_decode(attachments: list[Any]) -> dict[str, Any] | None:
