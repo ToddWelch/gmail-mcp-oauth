@@ -109,6 +109,7 @@ TOOL_SCOPE_REQUIREMENTS: dict[str, tuple[str, ...]] = {
     "read_email": (SCOPE_READONLY,),
     "search_emails": (SCOPE_READONLY,),
     "download_attachment": (SCOPE_READONLY,),
+    "read_attachment_text": (SCOPE_READONLY,),
     "download_email": (SCOPE_READONLY,),
     "get_thread": (SCOPE_READONLY,),
     "list_inbox_threads": (SCOPE_READONLY,),
@@ -161,20 +162,18 @@ TOOL_SCOPE_REQUIREMENTS: dict[str, tuple[str, ...]] = {
     "get_or_create_label": (SCOPE_MODIFY,),
     # create_filter_from_template: filter creation; gmail.settings.basic.
     "create_filter_from_template": (SCOPE_SETTINGS_BASIC,),
-    # ------------------------------------------------------------------
-    # Bootstrap tool.
-    # ------------------------------------------------------------------
+    # ---- Bootstrap tool ----
     # connect_gmail_account: bootstrap handshake; dispatcher short-circuits
     # before check_scopes runs (see bootstrap.is_bootstrap_tool and
     # dispatch.dispatch_tool_call). Empty tuple is a presence marker for
-    # test_table_has_exactly_33_tools, NOT "any scope is sufficient".
+    # test_table_has_exactly_34_tools, NOT "any scope is sufficient".
     "connect_gmail_account": (),
 }
 
 
-# Total tool count: 33 (11 read + 15 write + 4 cleanup + 1 bootstrap + 2
+# Total tool count: 34 (12 read + 15 write + 4 cleanup + 1 bootstrap + 2
 # fanout). Single source of truth for the __init__.py count assertion.
-EXPECTED_TOOL_COUNT = 33
+EXPECTED_TOOL_COUNT = 34
 
 
 # ---------------------------------------------------------------------------

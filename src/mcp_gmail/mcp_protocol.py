@@ -3,7 +3,7 @@
 We implement only the subset required by Claude.ai's remote connector:
 
 - initialize
-- tools/list   (returns the full 33-tool surface: 13 read + 15 write + 4 cleanup + 1 bootstrap)
+- tools/list   (returns the full 34-tool surface: 14 read + 15 write + 4 cleanup + 1 bootstrap)
 - tools/call   (dispatches to gmail_tools.dispatch_tool_call)
 - ping         (optional liveness)
 

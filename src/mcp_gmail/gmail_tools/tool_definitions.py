@@ -1,15 +1,16 @@
-"""TOOL_DEFINITIONS: read manifest, 11 entries (5 native + 3 + 3 spliced).
+"""TOOL_DEFINITIONS: read manifest, 12 entries (5 native + 1 + 3 + 3 spliced).
 
 Native here: 5 message and thread tools (read_email, search_emails,
 download_attachment, download_email, get_thread). Spliced from
-tool_definitions_threads_manage.py: 3 thread-management tools
-(list_inbox_threads, get_inbox_with_threads, modify_thread), split out
-so this file stays under the 300-LOC rule after the format='text'
-description additions. Spliced from tool_definitions_labels_filters.py:
-3 label and filter tools (list_email_labels, list_filters, get_filter).
-Both splices preserve the original manifest order. Split for the
-300-LOC rule. gmail_tools/__init__.py concatenates this read manifest
-with the write, bootstrap, and extras manifests for the 33-tool surface.
+tool_definitions_read_extract.py: 1 read-extract tool
+(read_attachment_text), split out so this file stays under the 300-LOC
+rule. Spliced from tool_definitions_threads_manage.py: 3 thread-management
+tools (list_inbox_threads, get_inbox_with_threads, modify_thread). Spliced
+from tool_definitions_labels_filters.py: 3 label and filter tools
+(list_email_labels, list_filters, get_filter). All splices preserve the
+original manifest order. Split for the 300-LOC rule.
+gmail_tools/__init__.py concatenates this read manifest with the write,
+bootstrap, and extras manifests for the 34-tool surface.
 
 Every Gmail-ID-shaped field carries a `pattern` matching
 gmail_id._VALIDATION_PATTERN ({1,256}). download_attachment.attachment_id
@@ -24,6 +25,7 @@ from __future__ import annotations
 from typing import Any
 
 from .tool_definitions_labels_filters import TOOL_DEFINITIONS_LABELS_FILTERS
+from .tool_definitions_read_extract import TOOL_DEFINITIONS_READ_EXTRACT
 from .tool_definitions_threads_manage import TOOL_DEFINITIONS_THREADS_MANAGE
 from .tool_schemas import ACCOUNT_EMAIL_PROP
 
@@ -257,22 +259,26 @@ _GET_THREAD_DEF: dict[str, Any] = {
 }
 
 
-# Public list. The 5 native message+thread entries first, then the 3
-# thread-management entries spliced from
-# tool_definitions_threads_manage.py, then the 3 label+filter entries
-# spliced from tool_definitions_labels_filters.py, all to keep this
-# file under 300 LOC. Both splices mirror the precedent in
-# tool_definitions_admin.py (which splices in
-# tool_definitions_admin_cleanup.py the same way). The concatenation
-# order reproduces the pre-split manifest order exactly (read_email,
-# search_emails, download_attachment, download_email, get_thread,
-# list_inbox_threads, get_inbox_with_threads, modify_thread, then
-# labels/filters), so no index-dependent assertion is affected.
+# Public list. The 5 native message+thread entries, with the
+# read_attachment_text def spliced from tool_definitions_read_extract.py
+# in its manifest position (right after download_attachment); then the 3
+# thread-management entries spliced from tool_definitions_threads_manage.py
+# and the 3 label+filter entries from tool_definitions_labels_filters.py,
+# all to keep this file under 300 LOC. The splices mirror the precedent in
+# tool_definitions_admin.py (which splices in tool_definitions_admin_cleanup.py
+# the same way). The concatenation order reproduces the pre-split manifest
+# order exactly (read_email, search_emails, download_attachment,
+# read_attachment_text, download_email, get_thread, list_inbox_threads,
+# get_inbox_with_threads, modify_thread, then labels/filters), so no
+# index-dependent assertion is affected.
 TOOL_DEFINITIONS: list[dict[str, Any]] = (
     [
         _READ_EMAIL_DEF,
         _SEARCH_EMAILS_DEF,
         _DOWNLOAD_ATTACHMENT_DEF,
+    ]
+    + list(TOOL_DEFINITIONS_READ_EXTRACT)
+    + [
         _DOWNLOAD_EMAIL_DEF,
         _GET_THREAD_DEF,
     ]
@@ -281,7 +287,7 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = (
 )
 
 
-assert len(TOOL_DEFINITIONS) == 11, (
-    f"read manifest must have 11 entries (8 message/thread + "
-    f"3 labels/filters), got {len(TOOL_DEFINITIONS)}"
+assert len(TOOL_DEFINITIONS) == 12, (
+    f"read manifest must have 12 entries (5 native + 1 read-extract + "
+    f"3 threads-manage + 3 labels/filters), got {len(TOOL_DEFINITIONS)}"
 )

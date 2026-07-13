@@ -213,9 +213,21 @@ def not_found_error(message: str) -> dict[str, Any]:
     return tool_error(ToolErrorCode.NOT_FOUND, message)
 
 
-def bad_request_error(message: str) -> dict[str, Any]:
-    """Return a bad_request error. Used for caller-side input failures."""
-    return tool_error(ToolErrorCode.BAD_REQUEST, message)
+def bad_request_error(
+    message: str, *, error_data: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Return a bad_request error. Used for caller-side input failures.
+
+    Optional `error_data` flows through to the standard `data.error_data`
+    block so a caller can branch on a machine-readable discriminator
+    without parsing the human message. read_attachment_text uses it to
+    tag `kind: "unsupported"` (mime cannot be extracted) vs
+    `kind: "extraction_failed"` (a parsed-type file was malformed/hostile)
+    on the shared -32001 code, so no new numeric error code is minted.
+    Omitting the kwarg preserves the bare {"code", "message"} shape for
+    every existing caller.
+    """
+    return tool_error(ToolErrorCode.BAD_REQUEST, message, error_data=error_data)
 
 
 def upstream_error(message: str, *, status: int | None = None) -> dict[str, Any]:
