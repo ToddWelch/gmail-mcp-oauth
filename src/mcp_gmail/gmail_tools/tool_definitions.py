@@ -82,7 +82,11 @@ _SEARCH_EMAILS_DEF: dict[str, Any] = {
         "Supports operators like from:, to:, subject:, "
         "has:attachment, label:, before:, after:, and free-text. "
         "Returns a page of message stubs (id + threadId only); "
-        "follow up with read_email per ID for full content."
+        "follow up with read_email per ID for full content. Set "
+        "include_previews=true to enrich each result with "
+        "{subject, from, date, snippet, labelIds}; this costs one extra "
+        "Gmail metadata fetch per result (an opt-in N+1), so leave it "
+        "off when you only need IDs."
     ),
     "inputSchema": {
         "type": "object",
@@ -108,6 +112,15 @@ _SEARCH_EMAILS_DEF: dict[str, Any] = {
                 "description": "Max results per page. Gmail caps at 500.",
                 "minimum": 1,
                 "maximum": 500,
+            },
+            "include_previews": {
+                "type": "boolean",
+                "description": (
+                    "When true, enrich each result with preview metadata "
+                    "(subject, from, date, snippet, labelIds) at the cost "
+                    "of one extra Gmail metadata fetch per result. "
+                    "Default false (bare id + threadId stubs)."
+                ),
             },
         },
         "required": ["account_email"],

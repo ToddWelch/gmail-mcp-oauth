@@ -11,6 +11,7 @@ router uses is what gets covered.
 
 from __future__ import annotations
 
+import re
 from unittest.mock import patch
 
 import httpx
@@ -227,6 +228,219 @@ async def test_search_emails_no_args(client):
         )
         r = await messages.search_emails(client=client)
         assert r["messages"][0]["id"] == "M1"
+
+
+# ---------------------------------------------------------------------------
+# search_emails include_previews (Feature B / #8)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_search_previews_off_is_byte_identical_no_extra_calls(client):
+    """include_previews absent/False: the raw Gmail list page is returned
+    unchanged and NO per-hit metadata GET is made (no N+1)."""
+    listing = {
+        "messages": [{"id": "M1", "threadId": "T1"}, {"id": "M2", "threadId": "T2"}],
+        "nextPageToken": "np",
+        "resultSizeEstimate": 2,
+    }
+    with respx.mock(base_url=GMAIL_API_BASE, assert_all_called=False) as router:
+        list_route = router.get(path="/users/me/messages").mock(
+            return_value=httpx.Response(200, json=listing)
+        )
+        # Any per-message GET would be a separate path; assert none fire.
+        per_msg = router.get(re.compile(r"/users/me/messages/M\d+")).mock(
+            return_value=httpx.Response(200, json={"id": "should-not-be-called"})
+        )
+        r_default = await messages.search_emails(client=client, q="x")
+        r_false = await messages.search_emails(client=client, q="x", include_previews=False)
+
+    assert r_default == listing  # byte-identical to Gmail's list page
+    assert r_false == listing
+    assert list_route.called is True
+    assert per_msg.called is False  # zero extra Gmail calls when off
+
+
+@pytest.mark.asyncio
+async def test_search_previews_on_enriches_each_hit(client):
+    """include_previews=True enriches each stub with
+    {id, threadId, subject, from, date, snippet, labelIds} via one
+    metadata GET per hit; envelope (nextPageToken/resultSizeEstimate)
+    is preserved."""
+    listing = {
+        "messages": [{"id": "M1", "threadId": "T1"}, {"id": "M2", "threadId": "T2"}],
+        "nextPageToken": "np",
+        "resultSizeEstimate": 2,
+    }
+
+    def per_msg_handler(request: httpx.Request) -> httpx.Response:
+        mid = request.url.path.rsplit("/", 1)[-1]
+        assert request.url.params.get("format") == "metadata"
+        return httpx.Response(
+            200,
+            json={
+                "id": mid,
+                "threadId": f"T{mid[-1]}",
+                "labelIds": ["INBOX", "IMPORTANT"],
+                "snippet": f"snippet-{mid}",
+                "payload": {
+                    "headers": [
+                        {"name": "Subject", "value": f"Subj {mid}"},
+                        {"name": "From", "value": f"{mid}@example.com"},
+                        {"name": "Date", "value": "Mon, 13 Jul 2026 09:00:00 +0000"},
+                    ]
+                },
+            },
+        )
+
+    with respx.mock(base_url=GMAIL_API_BASE) as router:
+        router.get(path="/users/me/messages").mock(return_value=httpx.Response(200, json=listing))
+        router.get(re.compile(r"/users/me/messages/M\d+")).mock(side_effect=per_msg_handler)
+        r = await messages.search_emails(client=client, q="x", include_previews=True)
+
+    assert r["nextPageToken"] == "np"
+    assert r["resultSizeEstimate"] == 2
+    previews = r["messages"]
+    assert len(previews) == 2
+    first = previews[0]
+    assert first == {
+        "id": "M1",
+        "threadId": "T1",
+        "subject": "Subj M1",
+        "from": "M1@example.com",
+        "date": "Mon, 13 Jul 2026 09:00:00 +0000",
+        "snippet": "snippet-M1",
+        "labelIds": ["INBOX", "IMPORTANT"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_search_previews_absent_header_is_null(client):
+    """A hit missing the Date header yields date=None (absent -> null),
+    not a KeyError; other preview fields still populate."""
+    listing = {"messages": [{"id": "M1", "threadId": "T1"}]}
+
+    def per_msg_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "M1",
+                "threadId": "T1",
+                "labelIds": [],
+                "snippet": "s",
+                "payload": {"headers": [{"name": "Subject", "value": "Only subject"}]},
+            },
+        )
+
+    with respx.mock(base_url=GMAIL_API_BASE) as router:
+        router.get(path="/users/me/messages").mock(return_value=httpx.Response(200, json=listing))
+        router.get("/users/me/messages/M1").mock(side_effect=per_msg_handler)
+        r = await messages.search_emails(client=client, q="x", include_previews=True)
+
+    p = r["messages"][0]
+    assert p["subject"] == "Only subject"
+    assert p["from"] is None
+    assert p["date"] is None
+    assert p["labelIds"] == []
+
+
+@pytest.mark.asyncio
+async def test_search_previews_per_hit_failure_degrades_not_aborts(client):
+    """A per-hit metadata GET that 404s degrades THAT entry to
+    {id, threadId, error_status}; the other hits still enrich, and the
+    page is not aborted."""
+    listing = {
+        "messages": [{"id": "M1", "threadId": "T1"}, {"id": "M2", "threadId": "T2"}],
+    }
+
+    def per_msg_handler(request: httpx.Request) -> httpx.Response:
+        mid = request.url.path.rsplit("/", 1)[-1]
+        if mid == "M2":
+            return httpx.Response(404, json={})
+        return httpx.Response(
+            200,
+            json={
+                "id": mid,
+                "threadId": "T1",
+                "labelIds": ["INBOX"],
+                "snippet": "ok",
+                "payload": {"headers": [{"name": "Subject", "value": "Good"}]},
+            },
+        )
+
+    with respx.mock(base_url=GMAIL_API_BASE) as router:
+        router.get(path="/users/me/messages").mock(return_value=httpx.Response(200, json=listing))
+        router.get(re.compile(r"/users/me/messages/M\d+")).mock(side_effect=per_msg_handler)
+        r = await messages.search_emails(client=client, q="x", include_previews=True)
+
+    good, bad = r["messages"]
+    assert good["subject"] == "Good"
+    assert bad == {"id": "M2", "threadId": "T2", "error_status": 404}
+
+
+def test_search_emails_schema_has_optional_include_previews():
+    """The tool schema advertises include_previews as an optional boolean;
+    omitting it is valid (not in required)."""
+    from mcp_gmail.gmail_tools import TOOL_DEFINITIONS
+
+    tool_def = next(d for d in TOOL_DEFINITIONS if d["name"] == "search_emails")
+    props = tool_def["inputSchema"]["properties"]
+    assert props["include_previews"]["type"] == "boolean"
+    assert "include_previews" not in tool_def["inputSchema"]["required"]
+
+
+@pytest.mark.asyncio
+async def test_search_previews_fanout_never_exceeds_concurrency_window(client):
+    """With a large result page, the preview fan-out never has more than
+    _PREVIEW_FANOUT_CONCURRENCY (10) metadata fetches in flight at once.
+    An instrumented handler tracks concurrent in-flight calls and records
+    the peak; the semaphore must hold it at or below the window even for
+    a page far larger than the window (250 hits here)."""
+    import asyncio
+
+    from mcp_gmail.gmail_tools.messages import _PREVIEW_FANOUT_CONCURRENCY
+
+    n = 250
+    listing = {"messages": [{"id": f"M{i}", "threadId": f"T{i}"} for i in range(n)]}
+
+    in_flight = 0
+    peak = 0
+    lock = asyncio.Lock()
+
+    async def per_msg_handler(request: httpx.Request) -> httpx.Response:
+        nonlocal in_flight, peak
+        async with lock:
+            in_flight += 1
+            peak = max(peak, in_flight)
+        # Yield so overlapping coroutines actually accumulate in flight;
+        # without an await the counter would never exceed 1.
+        await asyncio.sleep(0.001)
+        async with lock:
+            in_flight -= 1
+        mid = request.url.path.rsplit("/", 1)[-1]
+        return httpx.Response(
+            200,
+            json={
+                "id": mid,
+                "threadId": "T",
+                "labelIds": [],
+                "snippet": "s",
+                "payload": {"headers": [{"name": "Subject", "value": "x"}]},
+            },
+        )
+
+    with respx.mock(base_url=GMAIL_API_BASE) as router:
+        router.get(path="/users/me/messages").mock(return_value=httpx.Response(200, json=listing))
+        router.get(re.compile(r"/users/me/messages/M\d+")).mock(side_effect=per_msg_handler)
+        r = await messages.search_emails(client=client, q="x", include_previews=True)
+
+    # All hits enriched, and the burst stayed within the window.
+    assert len(r["messages"]) == n
+    assert peak <= _PREVIEW_FANOUT_CONCURRENCY
+    # Sanity: with 250 hits and a 10-wide window we should have actually
+    # saturated the window (proves the semaphore is the binding limit,
+    # not just a low natural concurrency).
+    assert peak == _PREVIEW_FANOUT_CONCURRENCY
 
 
 # ---------------------------------------------------------------------------

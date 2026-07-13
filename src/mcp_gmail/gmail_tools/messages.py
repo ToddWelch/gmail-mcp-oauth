@@ -35,12 +35,28 @@ audit happens at the dispatch boundary.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from .attachment_download import download_attachment
 from .errors import bad_request_error, not_found_error
 from .gmail_client import GmailApiError, GmailClient
 from .message_text import extract_lean_message
+
+# Header names fetched for the search_emails preview enrichment. Gmail's
+# metadata format with these three yields subject/from/date without the
+# body, so one lightweight metadata get per hit backs the preview.
+_PREVIEW_METADATA_HEADERS: tuple[str, ...] = ("Subject", "From", "Date")
+
+# Maximum number of preview metadata fetches in flight at once when
+# include_previews is set. search_emails' max_results tops out at 500,
+# so an unbounded asyncio.gather over the page would burst up to ~500
+# concurrent Gmail calls and risk tripping Gmail's per-second rate limit
+# / connection pool. The sibling fan-out tools cap their bursts for the
+# same reason (multi_search_emails=25, batch_read_emails=100); this
+# semaphore keeps the preview burst to a modest window regardless of
+# page size. Response shape is unchanged; only request pacing is bounded.
+_PREVIEW_FANOUT_CONCURRENCY = 10
 
 # download_attachment lives in attachment_download.py (split out under
 # the 300-LOC / distinct-responsibility rule). Re-exported here so the
@@ -110,19 +126,94 @@ async def search_emails(
     label_ids: list[str] | None = None,
     page_token: str | None = None,
     max_results: int | None = None,
+    include_previews: bool = False,
 ) -> dict[str, Any]:
     """Search messages with Gmail's search syntax. Returns the message ID list page.
 
     Note: Gmail's list endpoint does NOT return message bodies. Each
     item in the result is a stub with `id` and `threadId`. The caller
     is expected to follow up with read_email per ID for full content.
+
+    include_previews (default False) enriches each stub with lightweight
+    preview metadata: `{id, threadId, subject, from, date, snippet,
+    labelIds}`. This costs ONE extra Gmail metadata fetch per result (an
+    opt-in N+1); with it False or absent the response is byte-identical
+    to Gmail's raw list page (no extra Gmail calls). A per-hit fetch
+    failure degrades THAT entry to `{id, threadId, error_status}` rather
+    than aborting the page (mirrors get_inbox_with_threads).
     """
-    return await client.list_messages(
+    listing = await client.list_messages(
         q=q,
         label_ids=label_ids,
         page_token=page_token,
         max_results=max_results,
     )
+    if not include_previews:
+        # Byte-identical legacy path: no enrichment, no extra Gmail calls.
+        return listing
+
+    stubs = listing.get("messages") or []
+
+    # Bound the per-hit fan-out so a large page (max_results up to 500)
+    # cannot burst hundreds of concurrent Gmail calls. At most
+    # _PREVIEW_FANOUT_CONCURRENCY metadata fetches are in flight at once.
+    sem = asyncio.Semaphore(_PREVIEW_FANOUT_CONCURRENCY)
+
+    async def _preview(stub: dict[str, Any]) -> dict[str, Any]:
+        mid = stub.get("id")
+        tid = stub.get("threadId")
+        if not mid:
+            return stub
+        async with sem:
+            try:
+                message = await client.get_message(
+                    message_id=mid,
+                    format="metadata",
+                    metadata_headers=list(_PREVIEW_METADATA_HEADERS),
+                )
+            except GmailApiError as exc:
+                # Degrade this hit; do not abort the page.
+                return {"id": mid, "threadId": tid, "error_status": exc.status}
+        return _summarize_message_metadata(message)
+
+    previews = await asyncio.gather(*(_preview(s) for s in stubs))
+    enriched = dict(listing)
+    enriched["messages"] = list(previews)
+    return enriched
+
+
+def _summarize_message_metadata(message: dict[str, Any]) -> dict[str, Any]:
+    """Reduce a Gmail metadata-format message to the search preview shape.
+
+    Returns `{id, threadId, subject, from, date, snippet, labelIds}`.
+    subject/from/date come from payload.headers (absent -> null; first
+    occurrence wins). This is the per-MESSAGE analogue of
+    threads._summarize_thread, which is thread-shaped (thread_id,
+    from_addr, message_count) and therefore not reusable for a per-hit
+    search preview; kept local to search_emails, the only caller of this
+    exact shape.
+    """
+    headers = (message.get("payload") or {}).get("headers") or []
+    subject: str | None = None
+    from_addr: str | None = None
+    date: str | None = None
+    for h in headers:
+        name = (h.get("name") or "").lower()
+        if name == "subject" and subject is None:
+            subject = h.get("value")
+        elif name == "from" and from_addr is None:
+            from_addr = h.get("value")
+        elif name == "date" and date is None:
+            date = h.get("value")
+    return {
+        "id": message.get("id"),
+        "threadId": message.get("threadId"),
+        "subject": subject,
+        "from": from_addr,
+        "date": date,
+        "snippet": message.get("snippet"),
+        "labelIds": message.get("labelIds") or [],
+    }
 
 
 # ---------------------------------------------------------------------------

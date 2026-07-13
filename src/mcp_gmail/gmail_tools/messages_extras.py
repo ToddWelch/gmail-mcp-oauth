@@ -53,6 +53,7 @@ import httpx
 
 from .errors import bad_request_error
 from .gmail_client import GmailApiError, GmailClient
+from .message_text import safe_extract_lean_message
 
 
 # Caps mirror the schema layer; handler rejection is defense-in-depth.
@@ -174,11 +175,26 @@ async def batch_read_emails(
     format: str = "metadata",
     metadata_headers: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Fetch N messages concurrently. Returns per-id metadata or minimal records.
+    """Fetch N messages concurrently. Returns per-id metadata, minimal, or lean-text records.
 
-    format must be 'metadata' or 'minimal'. 'full' and 'raw' are
-    intentionally excluded (the schema enum enforces this; handler
+    format must be 'metadata', 'minimal', or 'text'. 'full' and 'raw'
+    are intentionally excluded (the schema enum enforces this; handler
     re-checks for defense-in-depth).
+
+    format='text' is the token-efficient batch read: Gmail has no 'text'
+    format, so each id is fetched with Gmail's 'full' format and reduced
+    to the SAME lean shape read_email/get_thread use, via
+    message_text.safe_extract_lean_message (curated headers + decoded
+    plain-text body + attachment metadata; the full payload, HTML part,
+    and inline base64 are dropped). Each message's text is capped at
+    MAX_TEXT_CHARS and hostile HTML degrades that ONE message (the safe
+    wrapper isolates per-message faults) rather than failing the batch.
+    AGGREGATE-SIZE CAVEAT: the PER-MESSAGE cap bounds each entry, but a
+    large batch of large emails can still produce a large TOTAL response.
+    That is the caller's explicit tradeoff (format='text' + batch size),
+    the same one get_thread format='text' makes across a thread's
+    messages. metadata_headers is ignored for format='text' (the lean
+    shape curates its own header set).
 
     metadata_headers default `['From', 'Subject', 'Date']` is applied
     when the caller omits the field . Passing None to the
@@ -191,6 +207,9 @@ async def batch_read_emails(
             {"message_id": "<requested>", "error_status": 404, "error_message": "..."},
             ...
         ]}
+    For format='text' each success entry is the lean-text shape
+    (`{id, threadId, labelIds, snippet, headers, text, text_source,
+    attachments}`); failures keep the same per-id error record.
     """
     if not message_ids:
         return bad_request_error("message_ids must be a non-empty list")
@@ -198,8 +217,13 @@ async def batch_read_emails(
         return bad_request_error(
             f"message_ids exceeds per-call cap of {_MAX_MESSAGE_IDS_PER_CALL} entries"
         )
-    if format not in ("metadata", "minimal"):
-        return bad_request_error(f"format must be one of metadata|minimal, got {format!r}")
+    if format not in ("metadata", "minimal", "text"):
+        return bad_request_error(f"format must be one of metadata|minimal|text, got {format!r}")
+
+    # 'text' is server-side sugar: Gmail is always called with 'full',
+    # then each message is reduced to the lean shape. metadata/minimal
+    # pass straight through to Gmail.
+    gmail_format = "full" if format == "text" else format
 
     # apply default when caller omitted the field.
     effective_headers: list[str] | None
@@ -210,13 +234,17 @@ async def batch_read_emails(
 
     async def _one(mid: str) -> dict[str, Any]:
         try:
-            return await client.get_message(
+            message = await client.get_message(
                 message_id=mid,
-                format=format,
+                format=gmail_format,
                 metadata_headers=effective_headers if format == "metadata" else None,
             )
         except (GmailApiError, httpx.RequestError, ValueError) as exc:
             return _make_error_record(label_key="message_id", label_value=mid, exc=exc)
+        # Per-message fault isolation: safe_extract_lean_message degrades
+        # a single hostile/malformed message to a minimal lean entry
+        # rather than failing the whole batch.
+        return safe_extract_lean_message(message) if format == "text" else message
 
     results = await asyncio.gather(*(_one(m) for m in message_ids))
     return {"messages": list(results)}
