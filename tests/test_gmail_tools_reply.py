@@ -380,3 +380,76 @@ async def test_reply_all_idempotency_cache_hit_skips_gmail(client):
         )
         assert any_route.called is False
     assert r == {"id": "cached-1", "threadId": "T"}
+
+
+# ---------------------------------------------------------------------------
+# body_html -> multipart/alternative (reply_all)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_reply_all_body_html_is_multipart_alternative_raw_html(client):
+    """reply_all with body_html sends a multipart/alternative reply: the
+    text/html part carries the raw (un-escaped) html, and reply threading
+    headers (In-Reply-To / References / Re: subject) are still emitted."""
+    sent_bodies: list[dict] = []
+
+    def get_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=_original_message(
+                headers=[
+                    ("From", "alice@example.com"),
+                    ("To", "me@example.com"),
+                    ("Subject", "Hello"),
+                    ("Message-ID", "<msg-1@example.com>"),
+                ]
+            ),
+        )
+
+    def profile_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"emailAddress": "me@example.com"})
+
+    def send_handler(request: httpx.Request) -> httpx.Response:
+        import json as _json
+
+        sent_bodies.append(_json.loads(request.read().decode()))
+        return httpx.Response(200, json={"id": "sent-1", "threadId": "THREAD"})
+
+    html = "<table><tr><td>reply</td></tr></table>"
+    with respx.mock(base_url=GMAIL_API_BASE) as router:
+        router.get("/users/me/messages/ORIG").mock(side_effect=get_handler)
+        router.get("/users/me/profile").mock(side_effect=profile_handler)
+        router.post("/users/me/messages/send").mock(side_effect=send_handler)
+        r = await reply.reply_all(
+            client=client,
+            auth0_sub="u",
+            account_email="me@example.com",
+            message_id="ORIG",
+            body_text="reply",
+            body_html=html,
+        )
+    assert r == {"id": "sent-1", "threadId": "THREAD"}
+
+    import base64
+    from email import message_from_bytes
+    from email.policy import default as default_policy
+
+    raw_b64 = sent_bodies[0]["raw"]
+    padded = raw_b64 + "=" * (-len(raw_b64) % 4)
+    msg = message_from_bytes(base64.urlsafe_b64decode(padded), policy=default_policy)
+
+    assert msg.get_content_type() == "multipart/alternative"
+    parts = msg.get_payload()
+    assert [p.get_content_type() for p in parts] == ["text/plain", "text/html"]
+    assert parts[0].get_content().rstrip("\n") == "reply"
+    html_payload = parts[1].get_content()
+    assert "<table>" in html_payload
+    assert html_payload.rstrip("\n") == html
+    assert "&lt;table&gt;" not in html_payload
+
+    # Threading + Re: subject invariants unchanged with an HTML body.
+    assert msg["In-Reply-To"] == "<msg-1@example.com>"
+    assert msg["References"] == "<msg-1@example.com>"
+    assert msg["Subject"] == "Re: Hello"
+    assert msg["To"] == "alice@example.com"

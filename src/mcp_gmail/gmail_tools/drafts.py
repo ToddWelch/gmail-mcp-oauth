@@ -50,6 +50,7 @@ def _build_raw_message(
     attachments: list[Attachment] | None,
     reply_to_message_id: str | None,
     reply_to_references: list[str] | None,
+    body_html: str | None = None,
 ) -> str | dict[str, Any]:
     """Build an EmailMessage and return its base64url-encoded form, or an error dict."""
     try:
@@ -60,6 +61,7 @@ def _build_raw_message(
             body_text=body_text,
             cc=cc,
             bcc=bcc,
+            body_html=body_html,
             attachments=attachments,
             reply_to_message_id=reply_to_message_id,
             reply_to_references=reply_to_references,
@@ -96,6 +98,7 @@ async def create_draft(
     body_text: str,
     cc: list[str] | None = None,
     bcc: list[str] | None = None,
+    body_html: str | None = None,
     attachments: list[Attachment] | None = None,
     reply_to_message_id: str | None = None,
     reply_to_references: list[str] | None = None,
@@ -111,6 +114,8 @@ async def create_draft(
     timestamps}). optional `thread_id` sets `message.threadId` (the
     authoritative thread join; header inference is the fallback), shape-
     validated in `client.create_draft` via `gmail_id.validate_gmail_id`.
+    optional `body_html` makes the draft multipart/alternative (body_text
+    is the plain-text fallback part).
 
     Upload-slot attachments are pre-loaded by the router; their
     `consume_token_hashes` are consumed AFTER a successful build and
@@ -123,6 +128,7 @@ async def create_draft(
         body_text=body_text,
         cc=cc,
         bcc=bcc,
+        body_html=body_html,
         attachments=attachments,
         reply_to_message_id=reply_to_message_id,
         reply_to_references=reply_to_references,
@@ -154,6 +160,7 @@ async def update_draft(
     body_text: str,
     cc: list[str] | None = None,
     bcc: list[str] | None = None,
+    body_html: str | None = None,
     attachments: list[Attachment] | None = None,
     reply_to_message_id: str | None = None,
     reply_to_references: list[str] | None = None,
@@ -166,6 +173,8 @@ async def update_draft(
     replaces the prior draft, no partial-update path). On 404 returns
     not_found_error. optional `thread_id` sets `message.threadId`, shape-
     validated in `client.update_draft` via `gmail_id.validate_gmail_id`.
+    optional `body_html` makes the draft multipart/alternative (body_text
+    is the plain-text fallback part).
     Upload-slot attachments are consumed AFTER a successful build and
     BEFORE the Gmail PUT (an oversize draft never burns a slot). When
     upload slots are at stake, a not-found existence check runs BEFORE
@@ -179,6 +188,7 @@ async def update_draft(
         body_text=body_text,
         cc=cc,
         bcc=bcc,
+        body_html=body_html,
         attachments=attachments,
         reply_to_message_id=reply_to_message_id,
         reply_to_references=reply_to_references,

@@ -67,6 +67,7 @@ async def reply_all(
     account_email: str,
     message_id: str,
     body_text: str,
+    body_html: str | None = None,
     attachments: list[dict[str, Any]] | None = None,
     idempotency_key: str | None = None,
     cache: IdempotencyCache | None = None,
@@ -86,6 +87,9 @@ async def reply_all(
     _MAX_EXPANDED_RECIPIENTS (100). Threading: Subject prefixed "Re: "
     unless already present; In-Reply-To + References set to the original
     Message-ID (appended to any existing References chain).
+
+    optional `body_html` makes the reply multipart/alternative (body_text
+    is the plain-text fallback part).
     """
     # ---- idempotency cache (READ side) ------------------------------------
     cache_obj = cache if cache is not None else default_cache
@@ -217,6 +221,7 @@ async def reply_all(
             subject=new_subject,
             body_text=body_text,
             cc=reply_cc or None,
+            body_html=body_html,
             attachments=resolved or None,
             reply_to_message_id=message_id_header,
             reply_to_references=refs_list,
