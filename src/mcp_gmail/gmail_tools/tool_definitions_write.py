@@ -25,14 +25,15 @@ from .tool_schemas import (
 )
 
 
-# Send / drafts share the same construction inputs (sender, to,
-# subject, body_text, cc, bcc, attachments, threading headers).
+# Send / drafts share the same construction inputs (sender, to, subject,
+# body_text, cc, bcc, body_html, attachments, threading headers).
 _DRAFT_BODY_PROPS: dict[str, Any] = {
     "account_email": ACCOUNT_EMAIL_PROP,
     "sender": {"type": "string", "minLength": 3, "maxLength": 320},
     "to": EMAIL_LIST_PROP,
     "subject": {"type": "string", "maxLength": 998},
     "body_text": {"type": "string"},
+    "body_html": {"type": "string"},
     "cc": EMAIL_LIST_PROP,
     "bcc": EMAIL_LIST_PROP,
     "attachments": {
@@ -72,9 +73,11 @@ _SEND_EMAIL_DEF: dict[str, Any] = {
     "description": (
         "Send a new email via Gmail. Builds an RFC 5322 message, "
         "enforces the 25 MiB encoded-size cap, and POSTs to "
-        "users.messages.send. Optional `idempotency_key` dedupes "
-        "retries within a 60s window keyed by (account, key). "
-        "Attachments accept an inline shape or an upload-handle shape "
+        "users.messages.send. Pass `body_html` for an HTML body "
+        "(multipart/alternative; body_text is the plain-text fallback). "
+        "Optional `idempotency_key` dedupes retries in a 60s window "
+        "keyed by (account, key). Attachments accept an inline shape "
+        "or an upload-handle shape "
         "({source:'upload', upload_token}); handles are consumed on send, "
         "so a send that fails after consume needs a fresh slot, not a retry."
     ),
@@ -94,10 +97,10 @@ _CREATE_DRAFT_DEF: dict[str, Any] = {
     "name": "create_draft",
     "description": (
         "Create a Gmail draft. Builds the message via the same "
-        "EmailMessage path send_email uses (25 MiB cap enforced). "
-        "Returns the draft id. Optional `thread_id` sets the "
-        "authoritative thread join on the underlying Gmail message; "
-        "header-only threading via reply_to_message_id / "
+        "EmailMessage path send_email uses (25 MiB cap enforced; "
+        "`body_html` for an HTML body). Returns the draft id. Optional "
+        "`thread_id` sets the authoritative thread join on the underlying "
+        "Gmail message; header-only threading via reply_to_message_id / "
         "reply_to_references is best-effort fallback. Attachments accept "
         "the inline or upload-handle shape; upload handles are consumed "
         "when the draft is created."
@@ -118,12 +121,13 @@ _UPDATE_DRAFT_DEF: dict[str, Any] = {
     "name": "update_draft",
     "description": (
         "Replace the contents of an existing draft. Gmail's update "
-        "is a full PUT; the body wholly replaces the prior draft. "
-        "Optional `thread_id` sets the authoritative thread "
-        "join on the underlying Gmail message; header-only threading "
-        "via reply_to_message_id / reply_to_references is best-effort "
-        "fallback. Attachments accept the inline or upload-handle shape; "
-        "upload handles are consumed when the draft is updated."
+        "is a full PUT; the body wholly replaces the prior draft "
+        "(`body_html` for an HTML body). Optional `thread_id` sets the "
+        "authoritative thread join on the underlying Gmail message; "
+        "header-only threading via reply_to_message_id / "
+        "reply_to_references is best-effort fallback. Attachments accept "
+        "the inline or upload-handle shape; upload handles are consumed "
+        "when the draft is updated."
     ),
     "inputSchema": {
         "type": "object",
@@ -233,8 +237,9 @@ _REPLY_ALL_DEF: dict[str, Any] = {
         "original sender if you want a reply-to-sender. Self is "
         "resolved via Gmail's getProfile so the linked mailbox does "
         "not appear in its own reply Cc list. The expanded recipient "
-        "set is capped at 100. Idempotency cache is shared with "
-        "send_email; do not reuse the same idempotency_key for both "
+        "set is capped at 100 (`body_html` for an HTML body). "
+        "Idempotency cache is shared "
+        "with send_email; do not reuse the same idempotency_key for both "
         "tools. Subject is prefixed with 'Re: ' unless it already "
         "starts with 'Re:'. Requires gmail.send scope. Attachments "
         "accept the inline or upload-handle shape; upload handles are "
@@ -255,6 +260,8 @@ _REPLY_ALL_DEF: dict[str, Any] = {
                 "pattern": "^[A-Za-z0-9_\\-]{1,256}$",
             },
             "body_text": {"type": "string"},
+            # Optional HTML body (uncapped, symmetric with body_text).
+            "body_html": {"type": "string"},
             "attachments": {
                 "type": "array",
                 "items": ATTACHMENT_PROP,

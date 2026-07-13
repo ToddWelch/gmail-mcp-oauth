@@ -131,6 +131,62 @@ def test_reject_max_length_violation():
     assert field is not None and "q" in field
 
 
+# 3b. body_html: optional string accepted at the dispatch boundary for
+# every message-building tool; omitting it still validates.
+
+
+_BODY_HTML_TOOLS = {
+    "send_email": {
+        "account_email": EMAIL,
+        "sender": EMAIL,
+        "to": [EMAIL],
+        "subject": "hi",
+        "body_text": "plain",
+    },
+    "create_draft": {
+        "account_email": EMAIL,
+        "sender": EMAIL,
+        "to": [EMAIL],
+        "subject": "hi",
+        "body_text": "plain",
+    },
+    "update_draft": {
+        "account_email": EMAIL,
+        "draft_id": "DRFT_1",
+        "sender": EMAIL,
+        "to": [EMAIL],
+        "subject": "hi",
+        "body_text": "plain",
+    },
+    "reply_all": {
+        "account_email": EMAIL,
+        "message_id": GMAIL_ID,
+        "body_text": "plain",
+    },
+}
+
+
+@pytest.mark.parametrize("tool_name", list(_BODY_HTML_TOOLS), ids=list(_BODY_HTML_TOOLS))
+def test_body_html_accepted_as_optional_string(tool_name):
+    """body_html validates as an optional string on each build tool."""
+    args = {**_BODY_HTML_TOOLS[tool_name], "body_html": "<table><tr><td>x</td></tr></table>"}
+    assert validate_arguments(tool_name, args) is None
+
+
+@pytest.mark.parametrize("tool_name", list(_BODY_HTML_TOOLS), ids=list(_BODY_HTML_TOOLS))
+def test_body_html_omitted_still_validates(tool_name):
+    """Omitting body_html is valid (additive/back-compat contract)."""
+    assert validate_arguments(tool_name, _BODY_HTML_TOOLS[tool_name]) is None
+
+
+@pytest.mark.parametrize("tool_name", list(_BODY_HTML_TOOLS), ids=list(_BODY_HTML_TOOLS))
+def test_body_html_wrong_type_rejected(tool_name):
+    """A non-string body_html is rejected at the schema boundary."""
+    args = {**_BODY_HTML_TOOLS[tool_name], "body_html": 123}
+    field = validate_arguments(tool_name, args)
+    assert field is not None and "body_html" in field
+
+
 # 4. Adversarial probes at the schema layer.
 
 

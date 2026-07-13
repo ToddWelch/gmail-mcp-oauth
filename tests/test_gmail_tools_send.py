@@ -334,3 +334,208 @@ async def test_send_email_does_not_log_subject_or_body_or_recipients(client, cap
         # benign substring match of "y@example.com" or similar in
         # framework debug output doesn't false-positive.
         assert "yy@example.com" not in msg
+
+
+# ---------------------------------------------------------------------------
+# body_html -> multipart/alternative on the wire (end-to-end through send)
+# ---------------------------------------------------------------------------
+
+
+def _decode_sent_message(send_route):
+    """Parse the EmailMessage Gmail actually received from a send POST.
+
+    Gmail's users.messages.send body is {"raw": base64url(rfc5322_bytes)}.
+    Decode the last request's raw field back into an EmailMessage so tests
+    can assert the exact MIME structure the recipient's client will see.
+    """
+    import base64
+    import json
+    from email import message_from_bytes
+    from email.policy import default as default_policy
+
+    body = json.loads(send_route.calls.last.request.content)
+    raw = body["raw"]
+    padded = raw + "=" * (-len(raw) % 4)
+    rfc5322 = base64.urlsafe_b64decode(padded)
+    return message_from_bytes(rfc5322, policy=default_policy)
+
+
+_HTML_TABLE = "<table><tr><td>Q1</td><td>$5</td></tr></table>"
+
+
+@pytest.mark.asyncio
+async def test_send_email_body_html_sends_multipart_alternative_raw_html(client):
+    """CORE PROOF at the send boundary: send_email with body_html POSTs a
+    multipart/alternative whose text/plain part == body_text and whose
+    text/html part carries the RAW (un-escaped) html. This is the exact
+    fix: a <table> is delivered as real HTML, not literal tags."""
+    with respx.mock(base_url=GMAIL_API_BASE) as router:
+        send_route = router.post("/users/me/messages/send").mock(
+            return_value=httpx.Response(200, json={"id": "s1", "threadId": "t1"})
+        )
+        r = await send.send_email(
+            client=client,
+            auth0_sub="u",
+            account_email="me@example.com",
+            sender="me@example.com",
+            to=["you@example.com"],
+            subject="report",
+            body_text="Q1: 5",
+            body_html=_HTML_TABLE,
+        )
+    assert send_route.call_count == 1
+    assert r == {"id": "s1", "threadId": "t1"}
+
+    msg = _decode_sent_message(send_route)
+    assert msg.get_content_type() == "multipart/alternative"
+    parts = msg.get_payload()
+    assert [p.get_content_type() for p in parts] == ["text/plain", "text/html"]
+    assert parts[0].get_content().rstrip("\n") == "Q1: 5"
+
+    html_payload = parts[1].get_content()
+    assert "<table>" in html_payload
+    assert "</table>" in html_payload
+    assert html_payload.rstrip("\n") == _HTML_TABLE
+    assert "&lt;table&gt;" not in html_payload
+
+
+@pytest.mark.asyncio
+async def test_send_email_without_body_html_is_single_text_plain(client):
+    """No body_html: the wire message stays a single text/plain (unchanged)."""
+    with respx.mock(base_url=GMAIL_API_BASE) as router:
+        send_route = router.post("/users/me/messages/send").mock(
+            return_value=httpx.Response(200, json={"id": "s2"})
+        )
+        await send.send_email(
+            client=client,
+            auth0_sub="u",
+            account_email="me@example.com",
+            sender="me@example.com",
+            to=["you@example.com"],
+            subject="s",
+            body_text="plain only",
+        )
+    msg = _decode_sent_message(send_route)
+    assert not msg.is_multipart()
+    assert msg.get_content_type() == "text/plain"
+    assert msg.get_content().rstrip("\n") == "plain only"
+
+
+@pytest.mark.asyncio
+async def test_send_email_body_html_plus_attachment_is_mixed_alternative(client):
+    """body_html + attachment: the wire message is multipart/mixed wrapping
+    a multipart/alternative (plain + html) and the attachment."""
+    import base64
+
+    data_b64 = base64.urlsafe_b64encode(b"PDFDATA").decode("ascii")
+    with respx.mock(base_url=GMAIL_API_BASE) as router:
+        send_route = router.post("/users/me/messages/send").mock(
+            return_value=httpx.Response(200, json={"id": "s3"})
+        )
+        await send.send_email(
+            client=client,
+            auth0_sub="u",
+            account_email="me@example.com",
+            sender="me@example.com",
+            to=["you@example.com"],
+            subject="s",
+            body_text="plain",
+            body_html=_HTML_TABLE,
+            attachments=[
+                {
+                    "filename": "r.pdf",
+                    "mime_type": "application/pdf",
+                    "data_base64url": data_b64,
+                }
+            ],
+        )
+    msg = _decode_sent_message(send_route)
+    assert msg.get_content_type() == "multipart/mixed"
+    atts = list(msg.iter_attachments())
+    assert len(atts) == 1 and atts[0].get_filename() == "r.pdf"
+    alt = next(p for p in msg.iter_parts() if p.get_content_type() == "multipart/alternative")
+    assert {p.get_content_type() for p in alt.iter_parts()} == {
+        "text/plain",
+        "text/html",
+    }
+
+
+@pytest.mark.asyncio
+async def test_send_email_body_html_oversize_bad_request_no_post(client):
+    """An oversize text+html+attachment set raises OversizeMessage inside
+    the build and returns bad_request BEFORE any Gmail POST (and before any
+    slot consume). The html body counts toward the 25 MiB cap."""
+    import base64
+
+    from mcp_gmail.gmail_tools.message_format import MAX_ENCODED_BYTES
+
+    big = b"x" * int(MAX_ENCODED_BYTES * 0.78)
+    data_b64 = base64.urlsafe_b64encode(big).decode("ascii")
+    with respx.mock(base_url=GMAIL_API_BASE, assert_all_called=False) as router:
+        send_route = router.post("/users/me/messages/send")
+        send_route.mock(return_value=httpx.Response(200, json={"id": "x"}))
+        r = await send.send_email(
+            client=client,
+            auth0_sub="u",
+            account_email="me@example.com",
+            sender="me@example.com",
+            to=["you@example.com"],
+            subject="s",
+            body_text="t",
+            body_html="<p>" + ("h" * 1000) + "</p>",
+            attachments=[
+                {
+                    "filename": "big.bin",
+                    "mime_type": "application/octet-stream",
+                    "data_base64url": data_b64,
+                }
+            ],
+        )
+        assert send_route.called is False
+    assert r["code"] == ToolErrorCode.BAD_REQUEST
+
+
+@pytest.mark.asyncio
+async def test_send_email_body_html_preserves_idempotency_and_headers(client):
+    """Invariants hold with an HTML body: header validation still rejects a
+    control-char subject (no POST), and the idempotency cache still dedupes
+    a body_html send to exactly one POST across two identical calls."""
+    # Header validation still fires with body_html present.
+    with respx.mock(base_url=GMAIL_API_BASE, assert_all_called=False) as router:
+        route = router.post("/users/me/messages/send")
+        route.mock(return_value=httpx.Response(200, json={"id": "x"}))
+        r = await send.send_email(
+            client=client,
+            auth0_sub="u",
+            account_email="me@example.com",
+            sender="me@example.com",
+            to=["you@example.com"],
+            subject="bad\r\nX-Injected: y",
+            body_text="t",
+            body_html=_HTML_TABLE,
+        )
+        assert route.called is False
+    assert r["code"] == ToolErrorCode.BAD_REQUEST
+
+    # Idempotency: two identical body_html sends => exactly one POST.
+    cache = IdempotencyCache()
+    with respx.mock(base_url=GMAIL_API_BASE) as router:
+        send_route = router.post("/users/me/messages/send").mock(
+            return_value=httpx.Response(200, json={"id": "s4", "threadId": "t4"})
+        )
+        kwargs = dict(
+            client=client,
+            auth0_sub="u",
+            account_email="me@example.com",
+            sender="me@example.com",
+            to=["you@example.com"],
+            subject="s",
+            body_text="t",
+            body_html=_HTML_TABLE,
+            idempotency_key="k-html",
+            cache=cache,
+        )
+        r1 = await send.send_email(**kwargs)
+        r2 = await send.send_email(**kwargs)
+    assert send_route.call_count == 1
+    assert r1 == r2 == {"id": "s4", "threadId": "t4"}

@@ -457,3 +457,107 @@ async def test_create_draft_thread_id_adversarial_probes_rejected(client, bad_va
             )
         assert any_route.called is False
     assert "thread_id" in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# body_html -> multipart/alternative (create_draft + update_draft)
+# ---------------------------------------------------------------------------
+
+
+def _decode_draft_message(captured_body):
+    """Parse the EmailMessage from a draft POST/PUT body ({"message":{"raw"}})."""
+    import base64
+    from email import message_from_bytes
+    from email.policy import default as default_policy
+
+    raw = captured_body["message"]["raw"]
+    padded = raw + "=" * (-len(raw) % 4)
+    return message_from_bytes(base64.urlsafe_b64decode(padded), policy=default_policy)
+
+
+_DRAFT_HTML = "<table><tr><td>cell</td></tr></table>"
+
+
+@pytest.mark.asyncio
+async def test_create_draft_body_html_is_multipart_alternative_raw_html(client):
+    """create_draft with body_html builds a multipart/alternative draft:
+    text/plain == body_text, text/html == raw (un-escaped) body_html."""
+    captured: dict[str, dict] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.read().decode())
+        return httpx.Response(200, json={"id": "d1", "message": {"id": "M1"}})
+
+    with respx.mock(base_url=GMAIL_API_BASE) as router:
+        router.post("/users/me/drafts").mock(side_effect=handler)
+        r = await drafts.create_draft(
+            client=client,
+            sender="me@x.com",
+            to=["you@x.com"],
+            subject="s",
+            body_text="cell",
+            body_html=_DRAFT_HTML,
+        )
+    assert r["id"] == "d1"
+    msg = _decode_draft_message(captured["body"])
+    assert msg.get_content_type() == "multipart/alternative"
+    parts = msg.get_payload()
+    assert [p.get_content_type() for p in parts] == ["text/plain", "text/html"]
+    assert parts[0].get_content().rstrip("\n") == "cell"
+    html_payload = parts[1].get_content()
+    assert "<table>" in html_payload
+    assert html_payload.rstrip("\n") == _DRAFT_HTML
+    assert "&lt;table&gt;" not in html_payload
+
+
+@pytest.mark.asyncio
+async def test_create_draft_without_body_html_stays_text_plain(client):
+    """No body_html: the draft is a single text/plain (unchanged)."""
+    captured: dict[str, dict] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.read().decode())
+        return httpx.Response(200, json={"id": "d2", "message": {"id": "M2"}})
+
+    with respx.mock(base_url=GMAIL_API_BASE) as router:
+        router.post("/users/me/drafts").mock(side_effect=handler)
+        await drafts.create_draft(
+            client=client,
+            sender="me@x.com",
+            to=["you@x.com"],
+            subject="s",
+            body_text="plain only",
+        )
+    msg = _decode_draft_message(captured["body"])
+    assert not msg.is_multipart()
+    assert msg.get_content_type() == "text/plain"
+
+
+@pytest.mark.asyncio
+async def test_update_draft_body_html_is_multipart_alternative_raw_html(client):
+    """update_draft with body_html PUTs a multipart/alternative draft with a
+    raw (un-escaped) text/html part."""
+    captured: dict[str, dict] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.read().decode())
+        return httpx.Response(200, json={"id": "d1", "message": {"id": "M1"}})
+
+    with respx.mock(base_url=GMAIL_API_BASE) as router:
+        router.put("/users/me/drafts/d1").mock(side_effect=handler)
+        r = await drafts.update_draft(
+            client=client,
+            draft_id="d1",
+            sender="me@x.com",
+            to=["you@x.com"],
+            subject="s",
+            body_text="cell",
+            body_html=_DRAFT_HTML,
+        )
+    assert r["id"] == "d1"
+    msg = _decode_draft_message(captured["body"])
+    assert msg.get_content_type() == "multipart/alternative"
+    parts = msg.get_payload()
+    assert [p.get_content_type() for p in parts] == ["text/plain", "text/html"]
+    assert parts[1].get_content().rstrip("\n") == _DRAFT_HTML
+    assert "&lt;table&gt;" not in parts[1].get_content()

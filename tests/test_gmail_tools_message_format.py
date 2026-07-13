@@ -318,3 +318,154 @@ def test_clean_header_values_still_build():
 def test_is_safe_header_value_char_class(value, safe):
     """The shared predicate rejects exactly C0 (<0x20), DEL/C1 (0x7F-0x9F)."""
     assert is_safe_header_value(value) is safe
+
+
+# ---------------------------------------------------------------------------
+# body_html -> multipart/alternative (the HTML-body feature)
+# ---------------------------------------------------------------------------
+
+
+# A styled table: the whole point of the feature. If this arrives escaped,
+# the recipient sees literal "<table>" text instead of a rendered table.
+_HTML_TABLE = "<table style='border:1px solid'><tr><td>Q1</td><td>$5 &amp; up</td></tr></table>"
+
+
+def test_without_body_html_stays_single_text_plain():
+    """Omitting body_html preserves the prior behavior EXACTLY: a single
+    text/plain message, not a multipart."""
+    msg = build_email_message(
+        sender="me@example.com",
+        to=["you@example.com"],
+        subject="s",
+        body_text="just text",
+    )
+    assert not msg.is_multipart()
+    assert msg.get_content_type() == "text/plain"
+    assert msg.get_content().rstrip("\n") == "just text"
+
+
+def test_body_html_builds_multipart_alternative_with_raw_html():
+    """CORE PROOF: with body_html, the message is multipart/alternative
+    carrying BOTH a text/plain part (== body_text) and a text/html part
+    whose payload is the RAW html (angle brackets intact, NOT escaped).
+    This is what proves a <table> is sent as real HTML, not literal tags."""
+    msg = build_email_message(
+        sender="me@example.com",
+        to=["you@example.com"],
+        subject="report",
+        body_text="Q1: 5 and up",
+        body_html=_HTML_TABLE,
+    )
+    assert msg.is_multipart()
+    assert msg.get_content_type() == "multipart/alternative"
+
+    parts = msg.get_payload()
+    assert len(parts) == 2
+    plain_part, html_part = parts
+
+    # Plain part first (precedence: MUAs render the LAST understood part).
+    assert plain_part.get_content_type() == "text/plain"
+    assert plain_part.get_content().rstrip("\n") == "Q1: 5 and up"
+
+    # HTML part last, content-type text/html.
+    assert html_part.get_content_type() == "text/html"
+
+    # The decisive assertion: the html payload is the RAW markup. The
+    # literal "<table" and "</table>" survive; the html was NOT
+    # HTML-escaped into "&lt;table&gt;".
+    html_payload = html_part.get_content()
+    assert "<table" in html_payload
+    assert "</table>" in html_payload
+    assert html_payload.rstrip("\n") == _HTML_TABLE
+    # Belt-and-suspenders: the escaped form must NOT appear.
+    assert "&lt;table" not in html_payload
+
+
+def test_body_html_none_is_the_default_and_omitted_matches_explicit_none():
+    """Passing body_html=None is identical to omitting it (single text/plain)."""
+    msg = build_email_message(
+        sender="me@example.com",
+        to=["you@example.com"],
+        subject="s",
+        body_text="b",
+        body_html=None,
+    )
+    assert not msg.is_multipart()
+    assert msg.get_content_type() == "text/plain"
+
+
+def test_body_html_with_attachment_is_mixed_wrapping_alternative():
+    """body_html + attachments: the message is multipart/mixed wrapping a
+    multipart/alternative (text/plain + text/html) plus the attachment.
+    The raw html still survives inside the alternative part."""
+    msg = build_email_message(
+        sender="me@example.com",
+        to=["you@example.com"],
+        subject="s",
+        body_text="plain",
+        body_html=_HTML_TABLE,
+        attachments=[
+            Attachment(filename="t.pdf", mime_type="application/pdf", data=b"PDF"),
+        ],
+    )
+    assert msg.get_content_type() == "multipart/mixed"
+
+    # The attachment is present and intact.
+    atts = list(msg.iter_attachments())
+    assert len(atts) == 1
+    assert atts[0].get_filename() == "t.pdf"
+    assert atts[0].get_content_type() == "application/pdf"
+
+    # A multipart/alternative body part carries plain + html.
+    alt = next(p for p in msg.iter_parts() if p.get_content_type() == "multipart/alternative")
+    subtypes = {p.get_content_type() for p in alt.iter_parts()}
+    assert subtypes == {"text/plain", "text/html"}
+    html_part = next(p for p in alt.iter_parts() if p.get_content_type() == "text/html")
+    assert "<table" in html_part.get_content()
+
+
+def test_body_html_does_not_bypass_the_oversize_cap(monkeypatch):
+    """The 25 MiB assembled-size gate now covers text + html + attachments.
+    An oversize text+html+attachment set raises OversizeMessage; the html
+    body is NOT exempt from the cap."""
+    from mcp_gmail.gmail_tools import message_format as mf
+
+    small = build_email_message(
+        sender="me@example.com",
+        to=["you@example.com"],
+        subject="hi",
+        body_text="t",
+        body_html="<p>h</p>",
+        attachments=[Attachment(filename="a.bin", mime_type="application/octet-stream", data=b"x")],
+    )
+    # Patch the cap one byte below this message's assembled size so the
+    # same shape now exceeds it: proves the html part counts toward the cap.
+    monkeypatch.setattr(mf, "MAX_ENCODED_BYTES", len(small.as_bytes()) - 1)
+    with pytest.raises(OversizeMessage):
+        build_email_message(
+            sender="me@example.com",
+            to=["you@example.com"],
+            subject="hi",
+            body_text="t",
+            body_html="<p>h</p>",
+            attachments=[
+                Attachment(filename="a.bin", mime_type="application/octet-stream", data=b"x"),
+            ],
+        )
+
+
+def test_body_html_content_is_not_header_validated():
+    """The HTML body is CONTENT, not a header. Angle brackets, ampersands,
+    and entities are legitimate and must NOT be rejected by the header
+    control-char validation (which only guards subject/sender/recipients/
+    threading headers). A body full of <>/& builds fine."""
+    html = "<div>a &amp; b &lt;ok&gt; <span>x</span></div>"
+    msg = build_email_message(
+        sender="me@example.com",
+        to=["you@example.com"],
+        subject="clean subject",
+        body_text="a & b",
+        body_html=html,
+    )
+    html_part = next(p for p in msg.iter_parts() if p.get_content_type() == "text/html")
+    assert html_part.get_content().rstrip("\n") == html

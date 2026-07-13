@@ -212,6 +212,15 @@ or if the new key is in `PRIOR_ENCRYPTION_KEYS`.
   introspection. `EmailMessage` is the modern Python email API and
   is the only acceptable path for the `send_email` tool. Enforced
   in `gmail_tools/message_format.py`.
+- **Optional HTML body via `body_html`** on `send_email`,
+  `create_draft`, `update_draft`, and `reply_all`. When supplied, the
+  message becomes `multipart/alternative`: `body_text` is the required
+  plain-text fallback part and `body_html` is the `text/html` part,
+  sent verbatim (not sanitized or escaped) so a styled `<table>`
+  renders in the recipient's mail client. Omitting `body_html` keeps
+  the prior plain-text-only behavior unchanged. Built via
+  `EmailMessage.add_alternative`; the HTML is email body content, not a
+  header, so the header control-char validation does not apply to it.
 - **`send_email` accepts an optional `idempotency_key`**. When
   supplied, the server dedupes calls in-process for 60 seconds. The
   cache key is `(auth0_sub, account_email, idempotency_key)`, so

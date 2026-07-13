@@ -159,15 +159,22 @@ def build_email_message(
     attachments: list[Attachment] | None = None,
     reply_to_message_id: str | None = None,
     reply_to_references: list[str] | None = None,
+    body_html: str | None = None,
 ) -> EmailMessage:
     """Build a fully-formed EmailMessage. Raises OversizeMessage if too big.
 
     Behaviors:
-    - Plain text body via .set_content(body_text). the send tool
-      currently assumes plain text. Adding HTML alternative parts is
-      a follow-up; if a future caller passes both text and HTML, this
-      function will need an `html_body` parameter and EmailMessage's
-      .add_alternative() flow.
+    - Plain text body via .set_content(body_text). When `body_html` is
+      supplied, .add_alternative(body_html, subtype="html") is called
+      AFTER set_content, so EmailMessage assembles a multipart/alternative
+      with the text/plain part FIRST and the text/html part LAST. MUAs
+      render the last part they understand (the HTML) and fall back to
+      the plain part, so body_text stays the required plain-text fallback.
+      When body_html is omitted, the message is text/plain only (the
+      prior, unchanged behavior). The HTML is passed through verbatim as
+      email BODY content: it is NOT a header, so the header control-char
+      validation does not apply, and it is NOT sanitized/escaped (that
+      would defeat the point; the recipient's mail client renders it).
     - Attachments are added via .add_attachment(data, maintype, subtype,
       filename=...). EmailMessage handles base64 encoding internally.
     - Threading headers (`In-Reply-To`, `References`) are populated
@@ -220,6 +227,13 @@ def build_email_message(
         msg["References"] = " ".join(bracketed)
 
     msg.set_content(body_text)
+    if body_html is not None:
+        # Promote to multipart/alternative: text/plain part first (added
+        # above), text/html part last. add_alternative writes the HTML as
+        # BODY content, not a header, so control-char header validation
+        # does not apply and the HTML is NOT escaped. Attachments below
+        # then wrap the alternative in a multipart/mixed.
+        msg.add_alternative(body_html, subtype="html")
 
     if attachments:
         for att in attachments:
