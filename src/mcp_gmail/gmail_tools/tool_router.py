@@ -97,6 +97,7 @@ async def route_tool(
                 label_ids=optional_str_list(arguments, "label_ids"),
                 page_token=optional_str(arguments, "page_token"),
                 max_results=optional_int(arguments, "max_results"),
+                include_previews=optional_bool(arguments, "include_previews"),
             )
 
         if tool_name == "download_attachment":

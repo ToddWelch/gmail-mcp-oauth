@@ -157,15 +157,22 @@ The service exposes 33 tools to MCP clients:
   `batch_read_emails`, `download_attachment`, `download_email`,
   `get_thread`, `list_inbox_threads`, `get_inbox_with_threads`,
   `modify_thread`, `list_email_labels`, `list_filters`, `get_filter`).
-  `read_email` and `get_thread` accept `format="text"`, a
-  token-efficient plain-text read for bloated HTML emails (e.g. Amazon
-  order/receipt emails that run 170K-250K chars and otherwise blow past
-  the MCP output token cap). It returns a lean object (curated headers +
-  decoded plain-text body + attachment metadata, no bytes), preferring
-  the `text/plain` part and falling back to `text/html` converted via
-  markdownify when there is no `text/plain`. See
+  `read_email`, `get_thread`, and `batch_read_emails` accept
+  `format="text"`, a token-efficient plain-text read for bloated HTML
+  emails (e.g. Amazon order/receipt emails that run 170K-250K chars and
+  otherwise blow past the MCP output token cap). It returns a lean object
+  (curated headers + decoded plain-text body + attachment metadata, no
+  bytes), preferring the `text/plain` part and falling back to
+  `text/html` converted via markdownify when there is no `text/plain`.
+  On `batch_read_emails` each message's `text` is capped, but a large
+  batch of large emails can still produce a large TOTAL response (the
+  caller's explicit tradeoff). `search_emails` accepts an optional
+  `include_previews` (default `false`) that enriches each hit with
+  `{subject, from, date, snippet, labelIds}` at the cost of one extra
+  Gmail metadata fetch per result (an opt-in N+1); `multi_search_emails`
+  and `get_inbox_with_threads` are already lean by design. See
   [`docs/GMAIL_MCP_TOOLS.md`](docs/GMAIL_MCP_TOOLS.md) for the full
-  return shape.
+  return shapes.
 - 15 write tools (`create_attachment_upload_slot`, `send_email`,
   `create_draft`, `update_draft`, `list_drafts`, `send_draft`,
   `delete_draft`, `create_label`, `update_label`, `delete_label`,

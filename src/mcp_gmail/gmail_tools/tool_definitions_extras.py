@@ -86,10 +86,18 @@ _BATCH_READ_EMAILS_DEF: dict[str, Any] = {
         "OAuth token; per-id failures (404, 401, 403) surface as "
         "{message_id, error_status} entries rather than aborting the "
         "batch. format='metadata' returns headers + snippet (default); "
-        "format='minimal' returns IDs + label IDs + snippet only. "
-        "format='full' is intentionally NOT supported (oversized "
-        "response bodies; callers wanting full bodies should call "
-        "read_email per id)."
+        "format='minimal' returns IDs + label IDs + snippet only; "
+        "format='text' returns the lean token-efficient shape per "
+        "message (curated headers + decoded plain-text body + "
+        "attachment metadata; the full payload, HTML, and inline base64 "
+        "are dropped, and each message's text is capped). Note: the cap "
+        "bounds EACH message, but a large batch of large emails can "
+        "still produce a large TOTAL response, which is the caller's "
+        "explicit tradeoff. format='full' is intentionally NOT supported "
+        "(oversized raw bodies; callers wanting the raw full body should "
+        "call read_email per id). Sibling read tools multi_search_emails "
+        "and get_inbox_with_threads are already lean by design (they "
+        "never return full message bodies)."
     ),
     "inputSchema": {
         "type": "object",
@@ -110,10 +118,11 @@ _BATCH_READ_EMAILS_DEF: dict[str, Any] = {
             "format": {
                 "type": "string",
                 "description": (
-                    "Gmail response format. Default 'metadata'. "
-                    "'full' and 'raw' are intentionally excluded."
+                    "Response format. Default 'metadata'. 'text' returns "
+                    "the lean per-message shape (capped body); 'full' and "
+                    "'raw' are intentionally excluded."
                 ),
-                "enum": ["metadata", "minimal"],
+                "enum": ["metadata", "minimal", "text"],
             },
             "metadata_headers": {
                 "type": "array",

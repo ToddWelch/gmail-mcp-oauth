@@ -14,6 +14,7 @@ Coverage matrix:
 
 from __future__ import annotations
 
+import base64
 import re
 
 import httpx
@@ -23,6 +24,11 @@ import respx
 from mcp_gmail.gmail_tools import TOOL_DEFINITIONS, messages_extras
 from mcp_gmail.gmail_tools.errors import ToolErrorCode
 from mcp_gmail.gmail_tools.gmail_client import GMAIL_API_BASE, GmailClient
+from mcp_gmail.gmail_tools.message_text import MAX_TEXT_CHARS
+
+
+def _b64url(text: str) -> str:
+    return base64.urlsafe_b64encode(text.encode("utf-8")).rstrip(b"=").decode("ascii")
 
 
 @pytest.fixture
@@ -132,6 +138,156 @@ async def test_batch_read_format_minimal_does_not_send_metadata_headers(client):
     keys = [k for k, _ in captured_multi[0]]
     assert "metadataHeaders" not in keys
     assert ("format", "minimal") in captured_multi[0]
+
+
+# ---------------------------------------------------------------------------
+# format='text': lean per-message shape (Feature A / #3, A2)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_batch_read_text_returns_lean_shape_and_calls_full(client):
+    """format='text' fetches each id with Gmail format='full' and reduces
+    each to the lean shape (curated headers + decoded plain-text body +
+    attachment metadata; the heavy payload is dropped)."""
+    captured: list[str] = []
+    plain = "Order total $42.00"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request.url.params.get("format", ""))
+        mid = request.url.path.rsplit("/", 1)[-1]
+        return httpx.Response(
+            200,
+            json={
+                "id": mid,
+                "threadId": f"t-{mid}",
+                "labelIds": ["INBOX"],
+                "snippet": "Order",
+                "payload": {
+                    "mimeType": "text/plain",
+                    "headers": [{"name": "Subject", "value": "Order"}],
+                    "body": {"data": _b64url(plain)},
+                },
+            },
+        )
+
+    with respx.mock(base_url=GMAIL_API_BASE) as router:
+        router.get(re.compile(r"/users/me/messages/M\d+")).mock(side_effect=handler)
+        r = await messages_extras.batch_read_emails(
+            client=client, message_ids=["M1", "M2"], format="text"
+        )
+
+    # Gmail is always called with 'full' for text mode.
+    assert captured == ["full", "full"]
+    msgs = r["messages"]
+    assert len(msgs) == 2
+    for i, m in enumerate(msgs, start=1):
+        assert m["id"] == f"M{i}"
+        assert m["text"] == plain
+        assert m["text_source"] == "text/plain"
+        assert m["headers"] == {"Subject": "Order"}
+        assert "payload" not in m  # heavy payload dropped
+
+
+@pytest.mark.asyncio
+async def test_batch_read_text_ignores_metadata_headers(client):
+    """format='text' never sends metadataHeaders (the lean shape curates
+    its own header set); Gmail is called with format=full only."""
+    captured_multi: list[list[tuple[str, str]]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured_multi.append(list(request.url.params.multi_items()))
+        return httpx.Response(200, json={"id": "M1", "payload": {"mimeType": "text/plain"}})
+
+    with respx.mock(base_url=GMAIL_API_BASE) as router:
+        router.get("/users/me/messages/M1").mock(side_effect=handler)
+        await messages_extras.batch_read_emails(
+            client=client,
+            message_ids=["M1"],
+            format="text",
+            metadata_headers=["From", "Subject"],
+        )
+
+    keys = [k for k, _ in captured_multi[0]]
+    assert "metadataHeaders" not in keys
+    assert ("format", "full") in captured_multi[0]
+
+
+@pytest.mark.asyncio
+async def test_batch_read_text_caps_big_html_message_per_entry(client):
+    """A message whose text/html converts to more than MAX_TEXT_CHARS is
+    truncated per entry (text_truncated set), so one huge email cannot
+    balloon its slot without bound. The response entry stays lean."""
+    # Build an HTML body that converts to well over the cap.
+    big = "<p>" + ("A" * (MAX_TEXT_CHARS + 5000)) + "</p>"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "M1",
+                "payload": {
+                    "mimeType": "text/html",
+                    "headers": [{"name": "Subject", "value": "Newsletter"}],
+                    "body": {"data": _b64url(big)},
+                },
+            },
+        )
+
+    with respx.mock(base_url=GMAIL_API_BASE) as router:
+        router.get("/users/me/messages/M1").mock(side_effect=handler)
+        r = await messages_extras.batch_read_emails(
+            client=client, message_ids=["M1"], format="text"
+        )
+
+    entry = r["messages"][0]
+    assert entry["text_source"] == "text/html"
+    assert entry.get("text_truncated") is True
+    assert len(entry["text"]) < len(big)  # capped, not the raw body
+
+
+@pytest.mark.asyncio
+async def test_batch_read_text_hostile_message_degrades_per_entry(client, monkeypatch):
+    """A message that makes the underlying extract raise degrades to a
+    minimal lean entry for THAT id via the real safe_extract_lean_message
+    (called through the module reference), rather than failing the whole
+    batch. Neighbours are unaffected."""
+    import mcp_gmail.gmail_tools.message_text as mt
+
+    real_extract = mt.extract_lean_message
+
+    def _selective(message):
+        # Blow up for M2 only; the real safe wrapper must catch it and
+        # degrade that one entry.
+        if message.get("id") == "M2":
+            raise RuntimeError("boom")
+        return real_extract(message)
+
+    monkeypatch.setattr(mt, "extract_lean_message", _selective)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        mid = request.url.path.rsplit("/", 1)[-1]
+        return httpx.Response(
+            200,
+            json={"id": mid, "threadId": f"t-{mid}", "payload": {"mimeType": "text/plain"}},
+        )
+
+    with respx.mock(base_url=GMAIL_API_BASE) as router:
+        router.get(re.compile(r"/users/me/messages/M\d+")).mock(side_effect=handler)
+        r = await messages_extras.batch_read_emails(
+            client=client, message_ids=["M1", "M2", "M3"], format="text"
+        )
+
+    msgs = r["messages"]
+    assert len(msgs) == 3
+    # M2 degraded to the minimal lean entry but still present and ordered.
+    degraded = msgs[1]
+    assert degraded["id"] == "M2"
+    assert degraded["text"] == ""
+    assert degraded["text_source"] == "none"
+    # Neighbours are normal lean entries.
+    assert msgs[0]["id"] == "M1"
+    assert msgs[2]["id"] == "M3"
 
 
 # ---------------------------------------------------------------------------
@@ -247,12 +403,16 @@ async def test_batch_read_invalid_format_rejected_at_handler(client):
 
 
 def test_pr3m_batch_read_format_enum_excludes_full_and_raw():
-    """Schema enum is exactly metadata + minimal; a future loosening to
-    `full` or `raw` would silently change response sizes by an order
-    of magnitude. Catch the drift here."""
+    """Schema enum is exactly metadata + minimal + text; a future
+    loosening to `full` or `raw` would silently change response sizes by
+    an order of magnitude (raw full payloads). `text` is the lean,
+    per-message-capped shape, so it is a permitted member; `full`/`raw`
+    must stay excluded. Catch the drift here."""
     tool_def = next(d for d in TOOL_DEFINITIONS if d["name"] == "batch_read_emails")
     fmt = tool_def["inputSchema"]["properties"]["format"]
-    assert fmt["enum"] == ["metadata", "minimal"]
+    assert fmt["enum"] == ["metadata", "minimal", "text"]
+    assert "full" not in fmt["enum"]
+    assert "raw" not in fmt["enum"]
 
 
 def test_pr3m_batch_read_caps_at_100():
