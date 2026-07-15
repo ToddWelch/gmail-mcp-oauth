@@ -116,8 +116,8 @@ def test_mcp_valid_token_initialize(client, signed_jwt):
 
 
 def test_mcp_valid_token_tools_list_returns_full_tool_surface(client, signed_jwt):
-    """All four manifests register 33 tools
-    (11 read + 19 write + 1 bootstrap + 2 fanout extras). tools/list
+    """All four manifests register 34 tools
+    (12 read + 19 write + 1 bootstrap + 2 fanout extras). tools/list
     reflects that."""
     token = signed_jwt()
     resp = client.post(
@@ -128,13 +128,14 @@ def test_mcp_valid_token_tools_list_returns_full_tool_surface(client, signed_jwt
     assert resp.status_code == 200
     data = resp.json()
     tools = data["result"]["tools"]
-    assert len(tools) == 33
+    assert len(tools) == 34
     names = {t["name"] for t in tools}
     # Bootstrap tool
     assert "connect_gmail_account" in names
     # Read side
     assert "read_email" in names
     assert "search_emails" in names
+    assert "read_attachment_text" in names
     # Write side
     assert "create_attachment_upload_slot" in names
     assert "send_email" in names

@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from . import filters_read, labels_read, messages, messages_extras, threads
+from . import attachment_text, filters_read, labels_read, messages, messages_extras, threads
 from .errors import (
     bad_request_error,
     needs_reauth_error,
@@ -102,6 +102,15 @@ async def route_tool(
 
         if tool_name == "download_attachment":
             return await messages.download_attachment(
+                client=client,
+                message_id=require_str(arguments, "message_id"),
+                attachment_id=optional_str(arguments, "attachment_id"),
+                filename=optional_str(arguments, "filename"),
+                part_index=optional_int(arguments, "part_index"),
+            )
+
+        if tool_name == "read_attachment_text":
+            return await attachment_text.read_attachment_text(
                 client=client,
                 message_id=require_str(arguments, "message_id"),
                 attachment_id=optional_str(arguments, "attachment_id"),

@@ -1,8 +1,9 @@
 """Gmail MCP tools package.
 
-The combined manifests export 33 tools, grouped for users as:
-  - 13 read tools (read, search, multi_search, batch_read,
-    download, get_thread, list_inbox_threads, get_inbox_with_threads,
+The combined manifests export 34 tools, grouped for users as:
+  - 14 read tools (read, search, multi_search, batch_read,
+    download_attachment, read_attachment_text, download_email,
+    get_thread, list_inbox_threads, get_inbox_with_threads,
     modify_thread, list_email_labels, list_filters, get_filter)
   - 15 write tools (create_attachment_upload_slot, send_email, drafts,
     label CRUD, modify_email_labels, filter CRUD, delete_email,
@@ -11,11 +12,11 @@ The combined manifests export 33 tools, grouped for users as:
      get_or_create_label, create_filter_from_template)
   -  1 bootstrap tool (connect_gmail_account)
 
-The same 33 entries are split across six manifest files for
+The same 34 entries are split across six manifest files for
 file-size discipline:
-  - `tool_definitions.py` hosts 8 message and thread read tools
+  - `tool_definitions.py` hosts 9 message and thread read tools
     natively and splices in `tool_definitions_labels_filters.py`
-    so its public list still exports all 11 single-shot read tools.
+    so its public list still exports all 12 single-shot read tools.
   - `tool_definitions_labels_filters.py` hosts the 3 label and
     filter read tools (`list_email_labels`, `list_filters`,
     `get_filter`).
@@ -47,7 +48,7 @@ from .tool_definitions_write import TOOL_DEFINITIONS_WRITE as _WRITE_DEFS
 
 
 # Concatenate read + write + bootstrap + extras manifests into the
-# single public list. Order: 11 read, 19 write, 1 bootstrap, 2 fanout
+# single public list. Order: 12 read, 19 write, 1 bootstrap, 2 fanout
 # extras. The combined list is the source of truth for tools/list and
 # tools/call validation in mcp_protocol.py.
 TOOL_DEFINITIONS: list = (
@@ -56,7 +57,7 @@ TOOL_DEFINITIONS: list = (
 
 
 # Tool-count assertion. EXPECTED_TOOL_COUNT lives in scope_check.py
-# (= 33). Drift in any of the manifests or the count constant
+# (= 34). Drift in any of the manifests or the count constant
 # fails fast at import time.
 assert len(TOOL_DEFINITIONS) == EXPECTED_TOOL_COUNT, (
     f"TOOL_DEFINITIONS must be {EXPECTED_TOOL_COUNT} entries, got {len(TOOL_DEFINITIONS)}"

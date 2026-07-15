@@ -10,7 +10,7 @@ two-stage trust chain (Auth0 / OIDC for the operator, Google OAuth
 tokens, MultiFernet for online key rotation, an Auth0-sub allowlist
 that can be updated without redeploy, and a post-callback
 confirmation page that defeats consent-phishing in multi-user
-deployments. The current tool surface is 32 tools (13 read + 14
+deployments. The current tool surface is 34 tools (14 read + 15
 write + 4 cleanup + 1 bootstrap).
 
 ## Who this is for
@@ -151,12 +151,18 @@ is Railway-specific beyond reading `DATABASE_URL` at boot.
 
 ## Tool reference
 
-The service exposes 33 tools to MCP clients:
+The service exposes 34 tools to MCP clients:
 
-- 13 read tools (`read_email`, `search_emails`, `multi_search_emails`,
-  `batch_read_emails`, `download_attachment`, `download_email`,
-  `get_thread`, `list_inbox_threads`, `get_inbox_with_threads`,
-  `modify_thread`, `list_email_labels`, `list_filters`, `get_filter`).
+- 14 read tools (`read_email`, `search_emails`, `multi_search_emails`,
+  `batch_read_emails`, `download_attachment`, `read_attachment_text`,
+  `download_email`, `get_thread`, `list_inbox_threads`,
+  `get_inbox_with_threads`, `modify_thread`, `list_email_labels`,
+  `list_filters`, `get_filter`). `read_attachment_text` extracts the
+  readable text of a PDF/CSV/XLSX/text attachment server-side (selected
+  like `download_attachment`) so the caller does not decode the file
+  itself; unsupported or malformed files return a typed `bad_request`
+  (`error_data.kind` of `unsupported` / `extraction_failed`) rather than
+  crashing the read.
   `read_email`, `get_thread`, and `batch_read_emails` accept
   `format="text"`, a token-efficient plain-text read for bloated HTML
   emails (e.g. Amazon order/receipt emails that run 170K-250K chars and
