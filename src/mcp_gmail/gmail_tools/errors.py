@@ -213,9 +213,7 @@ def not_found_error(message: str) -> dict[str, Any]:
     return tool_error(ToolErrorCode.NOT_FOUND, message)
 
 
-def bad_request_error(
-    message: str, *, error_data: dict[str, Any] | None = None
-) -> dict[str, Any]:
+def bad_request_error(message: str, *, error_data: dict[str, Any] | None = None) -> dict[str, Any]:
     """Return a bad_request error. Used for caller-side input failures.
 
     Optional `error_data` flows through to the standard `data.error_data`

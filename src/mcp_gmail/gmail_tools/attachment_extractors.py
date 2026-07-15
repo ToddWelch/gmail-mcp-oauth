@@ -31,9 +31,12 @@ objects, zip bombs), so each extractor is bounded hard:
 The library choices (pypdf, openpyxl) do NO network fetch, NO external
 entity resolution, and NO code execution on parse. openpyxl runs in
 `read_only=True, data_only=True` streaming mode so a zip bomb is bounded
-by the streaming cursor plus the caps here plus the upstream 25 MiB
-attachment input cap. pypdf's base install is pure-Python text
-extraction with no image/crypto extras pulled.
+by the streaming cursor plus the caps here. There is NO local byte-size
+guard in this module: input size is bounded by Gmail's own ~25 MiB
+attachment limit (external, not enforced here), and CPU/memory are
+bounded by the streaming read_only mode plus the row/cell/char caps
+below. pypdf's base install is pure-Python text extraction with no
+image/crypto extras pulled.
 """
 
 from __future__ import annotations
@@ -53,6 +56,19 @@ logger = logging.getLogger(__name__)
 _MAX_PDF_PAGES = 500
 _MAX_SHEET_ROWS = 100_000
 _MAX_CSV_ROWS = 100_000
+
+# Total-cell budget for XLSX extraction. The row cap alone does not bound
+# CPU when rows are WIDE: a crafted all-tiny-cell sheet (few rows, tens of
+# thousands of columns each, or many rows whose cells render empty so they
+# never accumulate toward the char cap) can ride the row cap and still
+# make openpyxl parse a very large number of cell elements per call. A
+# cell budget bounds the ACTUAL work regardless of the row/column shape,
+# which a pure row cap cannot. Checked inside the iter_rows loop; when the
+# budget is reached extraction aborts and returns what it has with the
+# truncation flag set. Sized well above any real invoice/export (a few
+# thousand rows of a few dozen columns is far under this) yet tight enough
+# that a bomb terminates in well under a second.
+_XLSX_MAX_CELLS = 200_000
 
 
 class ExtractionError(Exception):
@@ -107,18 +123,30 @@ def extract_pdf_text(data: bytes, *, max_chars: int) -> str:
         raise _safe("pdf extraction failed") from exc
 
 
-def extract_xlsx_text(data: bytes, *, max_chars: int) -> str:
-    """Extract cell values from XLSX bytes, bounded by max_chars + row cap.
+def extract_xlsx_text(data: bytes, *, max_chars: int) -> tuple[str, bool]:
+    """Extract cell values from XLSX bytes, bounded by max_chars, row cap, and cell budget.
 
     Streams every sheet in `read_only=True, data_only=True` mode (so a
     zip bomb is bounded by the streaming cursor rather than a full
     in-memory expand), rendering each row's non-empty cell values as a
     tab-joined line. Stops as soon as accumulated text reaches
-    `max_chars` (early-exit) or `_MAX_SHEET_ROWS` rows have been
-    emitted across all sheets. `data_only=True` returns the last-cached
-    computed value for formula cells instead of the formula string. Any
-    openpyxl failure OR RecursionError degrades to ExtractionError. The
-    workbook is always closed (read_only mode holds a file handle).
+    `max_chars` (early-exit), `_MAX_SHEET_ROWS` rows have been emitted, or
+    the `_XLSX_MAX_CELLS` total-cell budget is reached across all sheets.
+    The cell budget is the tighter guard for WIDE sheets: the row cap
+    cannot bound a few rows of tens of thousands of columns, or many rows
+    whose cells render empty (never accumulating toward the char cap), so
+    the cell count bounds the actual openpyxl work regardless of shape.
+    `data_only=True` returns the last-cached computed value for formula
+    cells instead of the formula string.
+
+    Returns `(text, budget_truncated)` where `budget_truncated` is True
+    when extraction stopped because the cell budget was reached while more
+    rows remained (so the caller marks the result truncated even though
+    the char cap may not have fired). The char-cap and row-cap early-exits
+    are surfaced through the normal char-cap truncation path in the
+    handler and do not set this flag. Any openpyxl failure OR
+    RecursionError degrades to ExtractionError. The workbook is always
+    closed (read_only mode holds a file handle).
     """
     from openpyxl import load_workbook
     from openpyxl.utils.exceptions import InvalidFileException
@@ -129,20 +157,32 @@ def extract_xlsx_text(data: bytes, *, max_chars: int) -> str:
         lines: list[str] = []
         total = 0
         rows_emitted = 0
+        cells_seen = 0
+        budget_truncated = False
         for sheet in wb.worksheets:
             if total >= max_chars or rows_emitted >= _MAX_SHEET_ROWS:
+                break
+            if cells_seen >= _XLSX_MAX_CELLS:
+                budget_truncated = True
                 break
             lines.append(f"# {sheet.title}")
             for row in sheet.iter_rows(values_only=True):
                 if total >= max_chars or rows_emitted >= _MAX_SHEET_ROWS:
                     break
+                if cells_seen >= _XLSX_MAX_CELLS:
+                    budget_truncated = True
+                    break
+                # Count every cell this row costs BEFORE rendering, so the
+                # budget bounds openpyxl's per-cell work regardless of how
+                # many cells render to non-empty text.
+                cells_seen += len(row)
                 cells = ["" if v is None else str(v) for v in row]
                 line = "\t".join(cells).rstrip("\t")
                 if line:
                     lines.append(line)
                     total += len(line)
                 rows_emitted += 1
-        return "\n".join(lines)
+        return "\n".join(lines), budget_truncated
     except RecursionError as exc:
         raise _safe("xlsx parse recursion limit") from exc
     except InvalidFileException as exc:

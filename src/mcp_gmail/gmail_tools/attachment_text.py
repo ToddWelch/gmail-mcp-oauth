@@ -201,11 +201,14 @@ async def read_attachment_text(
 
     raw = _decode_bytes(result.get("data"))
 
+    # xlsx signals a cell-budget abort out of band (its text may be under
+    # the char cap yet still incomplete); OR that into the final truncated.
+    budget_truncated = False
     try:
         if method == "pdf":
             text = extract_pdf_text(raw, max_chars=MAX_TEXT_CHARS)
         elif method == "xlsx":
-            text = extract_xlsx_text(raw, max_chars=MAX_TEXT_CHARS)
+            text, budget_truncated = extract_xlsx_text(raw, max_chars=MAX_TEXT_CHARS)
         elif method == "csv":
             text = extract_csv_text(_decode_text_bytes(raw), max_chars=MAX_TEXT_CHARS)
         else:  # "text"
@@ -224,5 +227,5 @@ async def read_attachment_text(
         "mime_type": att_mime,
         "extraction_method": method,
         "text": capped,
-        "truncated": truncated,
+        "truncated": truncated or budget_truncated,
     }

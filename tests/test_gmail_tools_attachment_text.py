@@ -65,9 +65,7 @@ async def _run(client, *, message, att_id, raw_bytes, **selector):
         selector = {"attachment_id": att_id}
     att_json = {"size": len(raw_bytes), "data": b64url(raw_bytes)}
     with respx.mock(base_url=GMAIL_API_BASE) as router:
-        router.get("/users/me/messages/M1").mock(
-            return_value=httpx.Response(200, json=message)
-        )
+        router.get("/users/me/messages/M1").mock(return_value=httpx.Response(200, json=message))
         router.get(f"/users/me/messages/M1/attachments/{att_id}").mock(
             return_value=httpx.Response(200, json=att_json)
         )
@@ -238,9 +236,7 @@ async def test_selector_error_passes_through_unchanged(client):
     """A not-found on the load-bearing path surfaces as the selector error."""
     with respx.mock(base_url=GMAIL_API_BASE) as router:
         router.get("/users/me/messages/M1").mock(return_value=httpx.Response(404, json={}))
-        r = await attachment_text.read_attachment_text(
-            client=client, message_id="M1", part_index=0
-        )
+        r = await attachment_text.read_attachment_text(client=client, message_id="M1", part_index=0)
     assert r["code"] == ToolErrorCode.NOT_FOUND
 
 
