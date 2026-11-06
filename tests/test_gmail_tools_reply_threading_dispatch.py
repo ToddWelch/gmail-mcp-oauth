@@ -39,7 +39,7 @@ from .test_gmail_tools_dispatch import (  # noqa: F401
 
 ACCOUNT = "x@example.com"
 SECRET_SUBJECT = "Re: Confidential Supplier Terms"
-RECIPIENT = "pat.supplier@example.net"
+RECIPIENT = "some.supplier@example.net"
 
 
 @pytest.fixture(autouse=True)
