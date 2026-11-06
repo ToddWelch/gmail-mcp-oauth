@@ -1,5 +1,27 @@
 ## Session Log
 
+### 2026-11-06 - Closeout: reply threading
+
+- Completed: PR #34 (`4893978`), PR #33 (`77c1e23`) and PR #38 (`aa4a1f0`) merged and deployed. Issues #35, #36 and #37 filed. The next entry down holds the detail of the fix, and this one corrects what it left out.
+- In progress: nothing.
+- Current state of the system: `main` and Railway `mcp-gmail` are at `aa4a1f0`, deployment `SUCCESS`, confirmed before the final check. On that deploy a mismatched subject was refused with the final wording and nothing was delivered.
+- **SAFETY-RELEVANT CHANGES, all live:**
+  - **Replies now refuse instead of sending** when they can't be threaded. A Gmail message id in `reply_to_message_id` is refused; it must be the Message-ID header.
+  - **`send_draft` now reads the draft first**, so a send-only token is refused.
+  - **A 5xx, network error or unreadable response on a send is now -32009**, and a same-key retry within 60 seconds returns that error rather than resending. After 60 seconds or with a new key it sends again, so check Sent first.
+  - **Reusing an idempotency key for a different message is refused.**
+  - **httpx request URLs no longer reach the logs.** Older Railway log lines may still hold `search_emails` queries.
+  - **pyjwt, cryptography, anyio and certifi are bumped in production.**
+- Reviews, with the commit each covered:
+  - #33: Crash Override Revise and Resubmit at `3e65023` (Trivy only), then Approved with notes at `e779076`, a narrow re-look at the fixes since that review. Cross-model gate cleared on Sonnet at `e779076`, read from the working checkout, with its findings file naming no SHA.
+  - #34: Crash Override Approved with notes at `3751493`, maximum effort. The cross-model gate did NOT run: no event fired and Crash Override called nothing material. That was this session's decision, written down only after the advisory session asked.
+  - #38: Crash Override Revise and Resubmit at `b479915`, for echoing a stored subject into the refusal message, then Approved with notes at `a013c7e`. The gate did not fire.
+  - The verdicts on #33 and #34 are recorded as PR comments. GitHub shows no review, because these agents don't post them and the repo requires 0 approvals.
+- Test mail: everything went only to the owner's own addresses. Sent test threads are archived in the linked mailbox, not deleted. Two unsent test drafts were deleted; neither was ever mail. Test mail delivered to the other address, if that mailbox holds a separate copy, was left alone because that account isn't linked here.
+- Next: Decide whether to make Bandit, Semgrep and Trivy required checks, which is Todd's call and is recommended. Then work issue #36, since the access-log traceback on every request buries real errors.
+- Open decisions: The required-checks question above, waiting on Todd. Whether Todd wants the cross-model gate run on #34 after the fact. Whether Todd wants the old revision of the #33 live-proof comment removed; it shows opaque ids of test mail and only the web UI can remove it.
+- Estimate vs actual: No estimate in the brief. Roughly 2.5 hours agent compute in total, including the dependency PR and the follow-up PR.
+
 ### 2026-11-06 - Replies always land in their Gmail conversation or are refused
 
 - Completed: Fixed a reply going out as a new conversation despite correct In-Reply-To, References and Subject. `send_message` posted only `raw`, and a Gmail API send with no `threadId` starts a new thread whatever the headers say; confirmed live, and by a regression test that failed on the old code. PR #33 (`77c1e23`): `send_email`, `reply_all`, `create_draft`, `update_draft` and `send_draft` resolve or verify the thread on the server with `rfc822msgid:` and an exact Message-ID compare, send `threadId`, compare the thread Gmail reports afterward (-32008), and refuse with nothing sent (-32007, typed reason, audit line) when a reply can't be threaded. No new required argument, so clients with a cached schema are protected. A reply needs read access (-32004); a new email doesn't. Idempotency now fingerprints the whole message, serializes calls sharing a key, and for 60 seconds replays an unconfirmed send as -32009 instead of resending. httpx no longer logs request URLs, which were writing `search_emails` queries to the log and would have written the new reply lookups too. PR #34 (`4893978`) bumped pyjwt, anyio, certifi and cryptography to clear Trivy (3 CRITICAL, 7 HIGH from drift), which was red against main's locks and blocked #33.
