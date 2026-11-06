@@ -98,8 +98,8 @@ async def refuse_if_update_drops_thread(
     return threading_refused_error(
         "This draft is a reply or sits in an existing conversation, and updating it without "
         "reply_to_message_id or thread_id would pull it out. Pass the same "
-        "reply_to_message_id, or this thread_id. To start a new conversation, delete it and "
-        "create a new draft.",
+        f"reply_to_message_id (or thread_id {own_thread}, if the subject has no Re:). To start "
+        "a new conversation, delete it and create a new draft.",
         reason=REASON_NO_REPLY_TARGET,
         thread_id=own_thread,
     )

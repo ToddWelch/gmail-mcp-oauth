@@ -132,14 +132,16 @@ THREAD_MISMATCH_NOTE: str = (
 )
 
 SEND_RESULT_NOTE: str = THREAD_MISMATCH_NOTE + (
-    " If Gmail does not confirm the send (network error or 5xx), the result is error -32009: "
+    " If Gmail does not confirm the send (network error, 5xx or an unreadable response), the "
+    "result is error -32009: "
     "it may have gone out, so check Sent before resending. A retry with the same "
     "idempotency_key within 60 seconds returns that error without sending."
 )
 
 UPDATE_DRAFT_THREADING_NOTE: str = (
-    " Updating a reply draft must pass reply_to_message_id or thread_id again; without "
-    "them the update is refused, because it would pull the draft out of its conversation."
+    " Updating a reply draft must pass reply_to_message_id again (or thread_id, if the subject "
+    "has no Re:); without it the update is refused, because it would pull the draft out of "
+    "its conversation."
 )
 
 

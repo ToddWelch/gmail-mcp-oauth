@@ -111,8 +111,8 @@ async def test_send_email_reply_posts_the_resolved_thread_id(client):
         result = await _send_reply(client)
 
     body = posted_body(send_route)
-    # Exact field set pins the accepted contract. Proved live by the post-deploy
-    # proof recorded on PR #33.
+    # Exact field set pins the accepted contract. Last verified live 2026-11-06, in the
+    # post-deploy proof recorded on PR #33.
     assert set(body) == {"raw", "threadId"}
     assert body["threadId"] == TARGET_THREAD
     assert result["threadId"] == TARGET_THREAD
@@ -250,7 +250,9 @@ async def test_reply_all_reports_a_post_send_thread_mismatch_as_an_error(client)
 
 @pytest.mark.asyncio
 async def test_reply_all_with_no_source_message_id_still_lands_by_thread_id(client):
-    """Nothing to put in In-Reply-To, but threadId alone joins (live 2026-11-06)."""
+    """Nothing to put in In-Reply-To, so threadId on the POST carries it. Live 2026-11-06,
+    threadId with no reply headers joined through drafts.send; messages.send with no
+    headers has not been exercised live, and the post-send compare covers it."""
     source = _source()
     source["payload"]["headers"] = [
         h for h in source["payload"]["headers"] if h["name"] != "Message-Id"

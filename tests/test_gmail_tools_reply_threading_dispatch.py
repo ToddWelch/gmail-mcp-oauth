@@ -124,7 +124,7 @@ async def test_a_refusal_writes_one_audit_line_and_no_private_content(caplog):
     # The search URL holds the Message-ID, percent-encoded, so match its bare stem.
     silence_http_client_url_logging()
     with respx.mock(base_url=GMAIL_API_BASE, assert_all_called=False) as router:
-        mount_lookup(router, message_metadata())
+        mount_lookup(router, message_metadata(subject="Stored Zanzibar Terms"))
         send_route = mount_send(router)
         with caplog.at_level(logging.INFO):
             result = await _dispatch(
@@ -141,7 +141,14 @@ async def test_a_refusal_writes_one_audit_line_and_no_private_content(caplog):
     assert f"error_code={ToolErrorCode.THREADING_REFUSED}" in lines[0]
     assert f"thread_id={TARGET_THREAD}" in lines[0]
     everything = "\n".join(r.getMessage() for r in caplog.records)
-    for private in ("Confidential", RECIPIENT, "parent-1", "secret body", "rfc822msgid"):
+    for private in (
+        "Confidential",
+        "Zanzibar",  # the replied-to subject, not just the caller's
+        RECIPIENT,
+        "parent-1",
+        "secret body",
+        "rfc822msgid",
+    ):
         assert private not in everything
 
 

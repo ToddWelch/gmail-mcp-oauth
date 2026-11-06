@@ -193,8 +193,8 @@ async def test_send_draft_refuses_a_draft_read_with_no_headers_or_thread(client,
 
 @pytest.mark.asyncio
 async def test_send_draft_asks_gmail_for_metadata(client):
-    """Contract: format=metadata is what returns headers. Proved live by the post-deploy
-    proof recorded on PR #33."""
+    """Contract: format=metadata is what returns headers. Last verified live 2026-11-06,
+    in the post-deploy proof recorded on PR #33."""
     with respx.mock(base_url=GMAIL_API_BASE, assert_all_called=False) as router:
         read = mount_draft(router)
         _mount_drafts_send(router)
