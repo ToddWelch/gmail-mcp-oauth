@@ -1,6 +1,6 @@
 """In-process idempotency cache for send-style tools.
 
-the `send_email` and `send_draft` tools accept an optional
+the `send_email` and `reply_all` tools accept an optional
 `idempotency_key`. When supplied, the server dedupes calls in-process
 for a TTL (default 60 seconds): the same key from the same actor
 returns the cached message id rather than sending again. This guards
@@ -13,6 +13,13 @@ NOT just the idempotency_key. Two different humans (or one human's
 two linked mailboxes) can legitimately use the same opaque
 idempotency string; without the actor partition we would silently
 return one human's message id to the other.
+
+Replay versus reuse
+-----------------------------------------
+Each entry stores a fingerprint of what the key was used for
+(request_fingerprint). reply_outcomes.replayed_result returns a cached
+result only for the same call, and key_lock serializes calls sharing a
+key, so a retry cannot send twice or inherit another message's result.
 
 Bounded cache
 -----------------------------------------------
@@ -32,9 +39,15 @@ the write side.
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import json
 import time
 from collections import OrderedDict
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from typing import Any
 
 
 DEFAULT_TTL_SECONDS = 60.0
@@ -44,10 +57,26 @@ DEFAULT_MAX_ENTRIES = 1000
 CacheKey = tuple[str, str, str]  # (auth0_sub, account_email, idempotency_key)
 
 
+def request_fingerprint(*parts: Any) -> str:
+    """Identify what a key was used for, so a replay can be told from a reuse.
+
+    Hashed, so a message body or attachment is never held in the cache.
+    """
+    encoded = json.dumps(parts, sort_keys=True, default=str).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 @dataclass
 class _Entry:
     value: dict  # whatever the send tool returned; opaque to this module
     expires_at_epoch: float
+    fingerprint: str | None = None
+
+
+@dataclass
+class _KeyLock:
+    lock: asyncio.Lock
+    holders: int = 0
 
 
 class IdempotencyCache:
@@ -64,13 +93,15 @@ class IdempotencyCache:
         clear()         -> None
         clear_for_actor(auth0_sub, account_email) -> int
 
-    Usage from the send tool:
-        cached = cache.get(key)
-        if cached is not None:
-            return cached
-        result = await send_via_gmail(...)
-        cache.set(key, result)
-        return result
+    Usage from the send tools:
+        async with cache.key_lock(key):
+            replay = replayed_result(cache=cache, key=key, fingerprint=fingerprint)
+            if replay is not None:
+                return replay
+            result = await send_once(...)
+            if cacheable_send_result(result):
+                cache.set(key, result, fingerprint=fingerprint)
+            return result
     """
 
     def __init__(
@@ -90,6 +121,34 @@ class IdempotencyCache:
         # decorator-style and not suitable here; we want explicit
         # set/get with a tuple key and TTL filtering.
         self._data: OrderedDict[CacheKey, _Entry] = OrderedDict()
+        self._locks: dict[CacheKey, _KeyLock] = {}
+
+    @asynccontextmanager
+    async def key_lock(self, key: CacheKey | None) -> AsyncIterator[None]:
+        """Serialize calls sharing a key, from the cache read through the cache write.
+
+        A send now spends several Gmail round trips between the two, and a
+        client retrying while the first call is still in flight would otherwise
+        miss the cache and send twice. Entries are dropped once idle, so this
+        does not grow with the number of keys ever used. A None key is a no-op.
+        """
+        if key is None:
+            yield
+            return
+        entry = self._locks.setdefault(key, _KeyLock(lock=asyncio.Lock()))
+        entry.holders += 1
+        try:
+            async with entry.lock:
+                yield
+        finally:
+            entry.holders -= 1
+            if entry.holders == 0:
+                self._locks.pop(key, None)
+
+    def fingerprint_of(self, key: CacheKey) -> str | None:
+        """The fingerprint stored with `key`, or None if absent or stored without one."""
+        entry = self._data.get(key)
+        return entry.fingerprint if entry is not None else None
 
     def get(self, key: CacheKey) -> dict | None:
         """Return cached value or None on miss / expired."""
@@ -104,19 +163,21 @@ class IdempotencyCache:
         self._data.move_to_end(key)
         return entry.value
 
-    def set(self, key: CacheKey, value: dict) -> None:
+    def set(self, key: CacheKey, value: dict, *, fingerprint: str | None = None) -> None:
         """Insert or refresh `key` -> `value`. Evicts oldest if over capacity."""
         if key in self._data:
             self._data.move_to_end(key)
             self._data[key] = _Entry(
                 value=value,
                 expires_at_epoch=time.time() + self._ttl,
+                fingerprint=fingerprint,
             )
             return
 
         self._data[key] = _Entry(
             value=value,
             expires_at_epoch=time.time() + self._ttl,
+            fingerprint=fingerprint,
         )
         # Evict from the front (oldest) until we are within capacity.
         while len(self._data) > self._max:

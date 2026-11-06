@@ -17,7 +17,7 @@ import respx
 from mcp_gmail.gmail_tools import reply
 from mcp_gmail.gmail_tools.errors import ToolErrorCode
 from mcp_gmail.gmail_tools.gmail_client import GMAIL_API_BASE, GmailClient
-from mcp_gmail.gmail_tools.idempotency import IdempotencyCache
+from mcp_gmail.gmail_tools.idempotency import IdempotencyCache, request_fingerprint
 
 
 @pytest.fixture
@@ -365,6 +365,7 @@ async def test_reply_all_idempotency_cache_hit_skips_gmail(client):
     cache.set(
         ("u", "me@example.com", "abc"),
         {"id": "cached-1", "threadId": "T"},
+        fingerprint=request_fingerprint("reply_all", "ORIG", "hi", None, None),
     )
     with respx.mock(base_url=GMAIL_API_BASE, assert_all_called=False) as router:
         any_route = router.route()

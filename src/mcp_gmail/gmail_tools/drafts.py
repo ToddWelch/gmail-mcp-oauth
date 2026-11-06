@@ -34,6 +34,9 @@ from .message_format import (
     build_email_message,
     message_to_base64url,
 )
+from .draft_threading import refuse_if_update_drops_thread
+from .reply_outcomes import verify_draft_thread
+from .reply_threading import canonical_message_id, resolve_expected_thread
 
 logger = logging.getLogger(__name__)
 
@@ -106,21 +109,36 @@ async def create_draft(
     auth0_sub: str = "",
     account_email: str = "",
     consume_token_hashes: list[str] | None = None,
+    granted_scope: str = "",
 ) -> dict[str, Any]:
     """Create a Gmail draft from message-construction inputs.
 
     Body built via the same EmailMessage helper send_email uses (25 MiB
     cap + threading identical). Returns Gmail's response ({id, message,
-    timestamps}). optional `thread_id` sets `message.threadId` (the
-    authoritative thread join; header inference is the fallback), shape-
-    validated in `client.create_draft` via `gmail_id.validate_gmail_id`.
+    timestamps}). With `reply_to_message_id` the server finds the thread
+    and sets `message.threadId` itself; a `thread_id` that disagrees is
+    refused (reply_threading.py). A `thread_id` alone is shape-validated in
+    `client.create_draft` via `gmail_id.validate_gmail_id`, and the thread
+    Gmail filed the draft in is compared with the expected one.
     optional `body_html` makes the draft multipart/alternative (body_text
     is the plain-text fallback part).
 
     Upload-slot attachments are pre-loaded by the router; their
-    `consume_token_hashes` are consumed AFTER a successful build and
-    BEFORE the Gmail POST, so an oversize draft never burns a slot.
+    `consume_token_hashes` are consumed AFTER the threading check and a
+    successful build and BEFORE the Gmail POST, so neither a refused nor
+    an oversize draft burns a slot.
     """
+    reply_to_message_id = canonical_message_id(reply_to_message_id)
+    expected_thread = await resolve_expected_thread(
+        client=client,
+        subject=subject,
+        reply_to_message_id=reply_to_message_id,
+        reply_to_references=reply_to_references,
+        granted_scope=granted_scope,
+        thread_id=thread_id,
+    )
+    if isinstance(expected_thread, dict):  # refusal -> NO slot consumed
+        return expected_thread
     raw = _build_raw_message(
         sender=sender,
         to=to,
@@ -142,7 +160,8 @@ async def create_draft(
     )
     if consume_err is not None:  # lost a race; do NOT create the draft
         return consume_err
-    return await client.create_draft(raw_message=raw, thread_id=thread_id)
+    result = await client.create_draft(raw_message=raw, thread_id=expected_thread)
+    return verify_draft_thread(result, expected_thread)
 
 
 # ---------------------------------------------------------------------------
@@ -168,19 +187,37 @@ async def update_draft(
     auth0_sub: str = "",
     account_email: str = "",
     consume_token_hashes: list[str] | None = None,
+    granted_scope: str = "",
 ) -> dict[str, Any]:
     """Replace an existing draft's contents (full PUT; body wholly
     replaces the prior draft, no partial-update path). On 404 returns
-    not_found_error. optional `thread_id` sets `message.threadId`, shape-
-    validated in `client.update_draft` via `gmail_id.validate_gmail_id`.
+    not_found_error. Threading follows create_draft, and because a PUT with no
+    thread would give the draft a new one, a reply draft updated without
+    `reply_to_message_id` or `thread_id` is refused. `thread_id` alone is
+    shape-validated in `client.update_draft` via `gmail_id.validate_gmail_id`.
     optional `body_html` makes the draft multipart/alternative (body_text
     is the plain-text fallback part).
-    Upload-slot attachments are consumed AFTER a successful build and
-    BEFORE the Gmail PUT (an oversize draft never burns a slot). When
-    upload slots are at stake, a not-found existence check runs BEFORE
-    consume so a stale draft_id (ordinary caller error) never burns a
-    one-time handle.
+    Upload-slot attachments are consumed AFTER the threading check and a
+    successful build and BEFORE the Gmail PUT (neither a refused nor an
+    oversize draft burns a slot). When upload slots are at stake, a
+    not-found existence check runs BEFORE consume so a stale draft_id
+    (ordinary caller error) never burns a one-time handle.
     """
+    reply_to_message_id = canonical_message_id(reply_to_message_id)
+    expected_thread = await resolve_expected_thread(
+        client=client,
+        subject=subject,
+        reply_to_message_id=reply_to_message_id,
+        reply_to_references=reply_to_references,
+        granted_scope=granted_scope,
+        thread_id=thread_id,
+    )
+    if isinstance(expected_thread, dict):  # refusal -> NO slot consumed
+        return expected_thread
+    if expected_thread is None:  # no target and no thread: must already be a new conversation
+        refusal = await refuse_if_update_drops_thread(client=client, draft_id=draft_id)
+        if refusal is not None:  # NO slot consumed
+            return refusal
     raw = _build_raw_message(
         sender=sender,
         to=to,
@@ -215,12 +252,13 @@ async def update_draft(
     if consume_err is not None:  # lost a race; do NOT update the draft
         return consume_err
     try:
-        return await client.update_draft(
+        result = await client.update_draft(
             draft_id=draft_id,
             raw_message=raw,
-            thread_id=thread_id,
+            thread_id=expected_thread,
         )
     except GmailApiError as exc:
         if exc.status == 404:
             return not_found_error(f"draft not found: {draft_id}")
         raise
+    return verify_draft_thread(result, expected_thread)

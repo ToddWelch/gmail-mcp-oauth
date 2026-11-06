@@ -21,6 +21,8 @@ from typing import Any
 from .drafts_post_send import apply_post_send_actions
 from .errors import bad_request_error, not_found_error
 from .gmail_client import GmailApiError, GmailClient
+from .draft_threading import expected_thread_for_draft
+from .reply_outcomes import verify_sent_thread
 from .scope_check import SCOPE_MODIFY, granted_scope_satisfies
 
 
@@ -74,6 +76,12 @@ async def send_draft(
     that requests one without gmail.modify is rejected at handler entry
     (bad_request_error -> /oauth/start), avoiding a needs_reauth AFTER
     the message was sent.
+
+    Before the send the draft is read and refused if it cannot land where it
+    says: In-Reply-To resolving to a different thread than the draft's own, a
+    target not found, a subject mismatch, or a Re: subject with no In-Reply-To.
+    After the send, a thread other than the draft's own returns thread_mismatch
+    and no post-send action runs, so nothing archives or labels the wrong thread.
     """
     wants_post_send = bool(archive_thread or add_labels or remove_labels)
     if wants_post_send and not granted_scope_satisfies(
@@ -86,12 +94,22 @@ async def send_draft(
             "add_labels / remove_labels"
         )
 
+    expected_thread = await expected_thread_for_draft(
+        client=client, draft_id=draft_id, granted_scope=granted_scope
+    )
+    if isinstance(expected_thread, dict):  # refusal or not-found; nothing sent
+        return expected_thread
+
     try:
         sent = await client.send_draft(draft_id=draft_id)
     except GmailApiError as exc:
         if exc.status == 404:
             return not_found_error(f"draft not found: {draft_id}")
         raise
+
+    verified = verify_sent_thread(sent, expected_thread)
+    if verified is not sent:  # landed outside its thread
+        return verified
 
     if not wants_post_send:
         return sent

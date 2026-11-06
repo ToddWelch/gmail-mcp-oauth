@@ -52,6 +52,7 @@ from .errors import (
     unknown_error,
 )
 from .gmail_client import GmailClient
+from .reply_outcomes import threading_audit_fields
 from .scope_check import ScopeInsufficient, UnknownTool, check_scopes
 from .tool_router import route_tool
 
@@ -240,8 +241,8 @@ async def dispatch_tool_call(
 
     # SESSION BOUNDARY: NONE during the Gmail call. GmailClient +
     # tool dispatch run with no open Postgres connection (db.py
-    # contract). granted_scope flows to route_tool so send_draft
-    # can gate post-send actions at handler entry.
+    # contract). granted_scope flows to route_tool so the send and draft
+    # tools can refuse at handler entry (post-send actions, reply read access).
     async with GmailClient(access_token=access_token) as client:
         result = await route_tool(
             tool_name=tool_name,
@@ -281,16 +282,15 @@ async def dispatch_tool_call(
         v = arguments.get(name)
         return v if isinstance(v, str) else None
 
-    audit(
-        tool=tool_name,
-        auth0_sub=ctx.auth0_sub,
-        account_email=ctx.account_email,
-        outcome=outcome,
-        message_id=_str_or_none("message_id"),
-        thread_id=_str_or_none("thread_id"),
-        attachment_id=_str_or_none("attachment_id"),
-        draft_id=_str_or_none("draft_id"),
-        filter_id=_str_or_none("filter_id"),
-        error_code=result.get("code") if is_error else None,
-    )
+    fields: dict[str, Any] = {
+        "outcome": outcome,
+        "message_id": _str_or_none("message_id"),
+        "thread_id": _str_or_none("thread_id"),
+        "attachment_id": _str_or_none("attachment_id"),
+        "draft_id": _str_or_none("draft_id"),
+        "filter_id": _str_or_none("filter_id"),
+        "error_code": result.get("code") if is_error else None,
+    }
+    fields.update(threading_audit_fields(result))
+    audit(tool=tool_name, auth0_sub=ctx.auth0_sub, account_email=ctx.account_email, **fields)
     return result

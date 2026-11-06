@@ -56,6 +56,20 @@ def client(jwks_document):
         scope.filters = list(filters)
 
 
+def test_boot_stops_httpx_logging_request_urls(jwks_document):
+    """A Gmail search URL carries a Message-ID or a caller's search string, and the
+    audit contract says neither reaches the log."""
+    httpx_logger = logging.getLogger("httpx")
+    httpx_logger.setLevel(logging.NOTSET)
+    pre_filter_state = _snapshot_filter_state()
+    with respx.mock(assert_all_called=False) as router:
+        router.get(TEST_JWKS_URL).mock(return_value=httpx.Response(200, json=jwks_document))
+        with TestClient(app):
+            assert httpx_logger.level == logging.WARNING
+    for scope, filters in pre_filter_state:
+        scope.filters = list(filters)
+
+
 def test_health(client):
     resp = client.get("/health")
     assert resp.status_code == 200

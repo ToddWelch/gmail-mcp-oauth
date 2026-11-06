@@ -275,3 +275,13 @@ def install_redacting_filter() -> None:
     for handler in error.handlers:
         if not any(isinstance(f, RedactingFilter) for f in handler.filters):
             handler.addFilter(RedactingFilter())
+
+
+def silence_http_client_url_logging() -> None:
+    """Stop httpx writing each request URL to the log at INFO.
+
+    A Gmail search URL carries its query: a replied-to Message-ID, or a caller's
+    search_emails string. The audit contract says neither reaches the log, and
+    the redacting filter looks for credentials, not these.
+    """
+    logging.getLogger("httpx").setLevel(logging.WARNING)

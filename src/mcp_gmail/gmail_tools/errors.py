@@ -17,6 +17,11 @@ for tool-side conditions:
     -32004  scope_insufficient    (granted scope < required scope)
     -32005  rate_limited          (Gmail returned 429 / userRateLimitExceeded)
     -32006  upstream_error        (Gmail 5xx)
+    -32007  threading_refused     (a reply could not be threaded; nothing sent)
+    -32008  thread_mismatch       (a message landed outside its expected thread)
+    -32009  send_outcome_unknown  (a send may or may not have gone out)
+
+The threading and send-outcome builders live in reply_outcomes.py.
 
 The numeric values are stable. Claude.ai sees the message + data; the
 host carries the codes mostly for machine-side branching by future
@@ -77,6 +82,9 @@ class ToolErrorCode:
     SCOPE_INSUFFICIENT = -32004
     RATE_LIMITED = -32005
     UPSTREAM_ERROR = -32006
+    THREADING_REFUSED = -32007
+    THREAD_MISMATCH = -32008
+    SEND_OUTCOME_UNKNOWN = -32009
 
 
 # Default reconnect hint string used by scope_insufficient errors. Kept

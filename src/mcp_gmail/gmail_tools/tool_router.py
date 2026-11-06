@@ -75,12 +75,10 @@ async def route_tool(
     test cases that route a read tool can omit them; in production the
     dispatcher always supplies both.
 
-    `granted_scope` is passed through so send_draft can detect
-    the "post-send actions requested but caller granted only SEND
-    scope" case at handler entry and return bad_request_error before
-    any Gmail HTTP call . Default empty string preserves
-    test backwards compatibility for callers that route read tools
-    without supplying scope.
+    `granted_scope` is passed through so the send and draft tools can
+    refuse at handler entry: post-send actions without gmail.modify, or a
+    reply without the read access its thread lookup needs. Default empty
+    string fails closed for those and lets read-tool tests omit it.
     """
     try:
         if tool_name == "read_email":

@@ -33,6 +33,8 @@ from mcp_gmail.gmail_tools.errors import ToolErrorCode
 from mcp_gmail.gmail_tools.gmail_client import GMAIL_API_BASE, GmailClient
 from mcp_gmail.gmail_tools.scope_check import SCOPE_MODIFY, SCOPE_SEND
 
+from ._threading_fixtures import mount_draft
+
 
 @pytest.fixture
 async def client():
@@ -69,9 +71,12 @@ async def test_send_draft_omits_post_send_actions_when_no_new_params(client):
         return httpx.Response(200, json={})
 
     with respx.mock(base_url=GMAIL_API_BASE, assert_all_called=False) as router:
+        mount_draft(router, thread_id="t-1")
         router.post("/users/me/drafts/send").mock(side_effect=send_handler)
         router.post(re.compile(r"/users/me/threads/[^/]+/modify")).mock(side_effect=modify_handler)
-        r = await drafts.send_draft(client=client, draft_id="d1")
+        r = await drafts.send_draft(
+            client=client, draft_id="d1", granted_scope=_SCOPE_MODIFY_GRANTED
+        )
 
     assert captured["body"] == {"id": "d1"}
     assert "post_send_actions" not in r
@@ -99,6 +104,7 @@ async def test_send_draft_archive_thread_calls_modify_with_inbox_remove(client):
         return httpx.Response(200, json={"id": "t-2"})
 
     with respx.mock(base_url=GMAIL_API_BASE) as router:
+        mount_draft(router, thread_id="t-2")
         router.post("/users/me/drafts/send").mock(side_effect=send_handler)
         router.post("/users/me/threads/t-2/modify").mock(side_effect=modify_handler)
         r = await drafts.send_draft(
@@ -127,6 +133,7 @@ async def test_send_draft_add_labels_passes_through(client):
         return httpx.Response(200, json={})
 
     with respx.mock(base_url=GMAIL_API_BASE) as router:
+        mount_draft(router, thread_id="t-3")
         router.post("/users/me/drafts/send").mock(side_effect=send_handler)
         router.post("/users/me/threads/t-3/modify").mock(side_effect=modify_handler)
         await drafts.send_draft(
@@ -152,6 +159,7 @@ async def test_send_draft_remove_labels_passes_through(client):
         return httpx.Response(200, json={})
 
     with respx.mock(base_url=GMAIL_API_BASE) as router:
+        mount_draft(router, thread_id="t-4")
         router.post("/users/me/drafts/send").mock(side_effect=send_handler)
         router.post("/users/me/threads/t-4/modify").mock(side_effect=modify_handler)
         await drafts.send_draft(
@@ -179,6 +187,7 @@ async def test_send_draft_archive_with_caller_remove_labels_dedups_inbox(client)
         return httpx.Response(200, json={})
 
     with respx.mock(base_url=GMAIL_API_BASE) as router:
+        mount_draft(router, thread_id="t-5")
         router.post("/users/me/drafts/send").mock(side_effect=send_handler)
         router.post("/users/me/threads/t-5/modify").mock(side_effect=modify_handler)
         await drafts.send_draft(
@@ -208,6 +217,7 @@ async def test_send_draft_archive_with_add_and_remove_merges_correctly(client):
         return httpx.Response(200, json={})
 
     with respx.mock(base_url=GMAIL_API_BASE) as router:
+        mount_draft(router, thread_id="t-6")
         router.post("/users/me/drafts/send").mock(side_effect=send_handler)
         router.post("/users/me/threads/t-6/modify").mock(side_effect=modify_handler)
         await drafts.send_draft(
@@ -245,6 +255,7 @@ async def test_send_draft_send_succeeds_modify_fails_returns_success_with_action
         return httpx.Response(404, json={})
 
     with respx.mock(base_url=GMAIL_API_BASE) as router:
+        mount_draft(router, thread_id="t-7")
         router.post("/users/me/drafts/send").mock(side_effect=send_handler)
         router.post("/users/me/threads/t-7/modify").mock(side_effect=modify_handler)
         r = await drafts.send_draft(
@@ -285,6 +296,8 @@ async def test_send_draft_send_404_skips_post_send_actions(client):
         return httpx.Response(200, json={})
 
     with respx.mock(base_url=GMAIL_API_BASE, assert_all_called=False) as router:
+        # The draft was readable a moment ago; the 404 comes from the send itself.
+        mount_draft(router, draft_id="missing")
         router.post("/users/me/drafts/send").mock(return_value=httpx.Response(404, json={}))
         router.post(re.compile(r"/users/me/threads/[^/]+/modify")).mock(side_effect=modify_handler)
         r = await drafts.send_draft(
@@ -391,6 +404,7 @@ async def test_send_draft_modify_network_error_surfaces_in_action_failures(clien
         raise httpx.ConnectError("simulated modify connect failure")
 
     with respx.mock(base_url=GMAIL_API_BASE) as router:
+        mount_draft(router, thread_id="t-net")
         router.post("/users/me/drafts/send").mock(side_effect=send_handler)
         router.post("/users/me/threads/t-net/modify").mock(side_effect=modify_handler)
         r = await drafts.send_draft(
@@ -422,6 +436,7 @@ async def test_send_draft_modify_validation_error_surfaces_in_action_failures(cl
         return httpx.Response(200, json={"id": "s", "threadId": "bad id with spaces"})
 
     with respx.mock(base_url=GMAIL_API_BASE, assert_all_called=False) as router:
+        mount_draft(router, thread_id="bad id with spaces")
         router.post("/users/me/drafts/send").mock(side_effect=send_handler)
         # Modify endpoint mock; validate_gmail_id should fail before
         # the request is sent, so this should NOT be called.
@@ -469,22 +484,25 @@ async def test_send_draft_missing_thread_id_surfaces_action_failure():
 
 
 @pytest.mark.asyncio
-async def test_send_draft_no_post_send_action_with_send_only_scope_succeeds(client):
-    """Legacy callers (no post-send params) with SEND-only scope still
-    succeed. The handler-entry gate only triggers when wants_post_send."""
-
-    def send_handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"id": "ok"})
-
-    with respx.mock(base_url=GMAIL_API_BASE) as router:
-        router.post("/users/me/drafts/send").mock(side_effect=send_handler)
+async def test_send_draft_with_send_only_scope_refuses_because_it_cannot_read_the_draft(client):
+    """A SEND-only token cannot read a draft, so the draft's thread cannot be
+    checked. It refuses with nothing sent. Previously this was allowed through,
+    which predates send_draft having to confirm where a draft will land."""
+    with respx.mock(base_url=GMAIL_API_BASE, assert_all_called=False) as router:
+        draft_route = mount_draft(router)
+        send_route = router.post("/users/me/drafts/send").mock(
+            return_value=httpx.Response(200, json={"id": "ok"})
+        )
         r = await drafts.send_draft(
             client=client,
             draft_id="d1",
             granted_scope=SCOPE_SEND,
         )
 
-    assert r["id"] == "ok"
+    assert send_route.call_count == 0
+    assert draft_route.call_count == 0
+    assert r["code"] == ToolErrorCode.SCOPE_INSUFFICIENT
+    assert r["data"]["error_data"]["reason"] == "read_scope_missing"
 
 
 # ---------------------------------------------------------------------------

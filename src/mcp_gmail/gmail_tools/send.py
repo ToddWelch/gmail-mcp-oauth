@@ -16,24 +16,15 @@ brief calls out four invariants and this module enforces all four:
    body, attachment filenames. The audit() helper at the dispatch
    boundary handles this; we just have to not call audit() ourselves.
 
-TRASH-semantics note
---------------------
-The TRASH-semantics design applies to delete tools; send tools are
-unaffected. The send-tool foot-gun mitigation that DOES apply is the
-"exactly one POST" assertion: the send tool must produce exactly one
-Gmail HTTP POST per call, even when an idempotency-cache hit returns
-the cached value. The cache hit path returns the cached dict without
-calling Gmail at all (zero POSTs). The cache miss path produces
-exactly one POST. Tests verify both branches.
+Exactly one POST
+----------------
+A replay returns the cached dict without calling Gmail (zero POSTs). A
+cache miss produces exactly one POST. Tests verify both branches.
 
 Recipient validation
 --------------------
-We do a lightweight syntactic check on each recipient address (must
-contain a single @ and have non-empty local + domain parts). Stricter
-RFC 5321 / 5322 validation is brittle and Gmail rejects malformed
-addresses anyway. The check exists primarily to fail fast on obvious
-caller bugs (e.g. accidentally passing a list of names instead of
-addresses).
+A lightweight syntactic check (a single @, non-empty local + domain)
+fails fast on obvious caller bugs. Gmail rejects anything subtler.
 """
 
 from __future__ import annotations
@@ -43,19 +34,24 @@ from typing import Any
 
 from .attachment_source import consume_slots, load_attachments
 from .errors import bad_request_error
-from .gmail_client import GmailClient
-from .idempotency import IdempotencyCache, default_cache
+from .gmail_client import GmailApiError, GmailClient
+from .idempotency import IdempotencyCache, default_cache, request_fingerprint
 from .message_format import (
     InvalidHeaderValue,
     OversizeMessage,
     build_email_message,
     message_to_base64url,
 )
+from .reply_outcomes import (
+    attachment_identity,
+    cacheable_send_result,
+    replayed_result,
+    unknown_outcome_or_raise,
+    verify_sent_thread,
+)
+from .reply_threading import canonical_message_id, resolve_expected_thread
 
-# Backward-compat re-exports. The inline-attachment decode helpers moved
-# to attachment_source.py (single home for attachment-input handling);
-# existing references to `send._decode_attachment` /
-# `send.MAX_ATTACHMENT_COUNT` continue to resolve here.
+# Backward-compat re-exports; the helpers moved to attachment_source.py.
 from .attachment_source import (  # noqa: F401
     MAX_ATTACHMENT_COUNT,
     _decode_attachment,
@@ -65,8 +61,7 @@ from .attachment_source import (  # noqa: F401
 logger = logging.getLogger(__name__)
 
 
-# Minimum syntactic check: localpart@domain with at least 1 char each.
-# Gmail will reject anything more nuanced; we only catch the obvious.
+# localpart@domain with at least 1 char each; Gmail rejects anything subtler.
 def _looks_like_email(addr: str) -> bool:
     if not isinstance(addr, str):
         return False
@@ -110,12 +105,20 @@ async def send_email(
     cache: IdempotencyCache | None = None,
     encryption_key: str | None = None,
     prior_encryption_keys: tuple[str, ...] = (),
+    granted_scope: str = "",
 ) -> dict[str, Any]:
     """Send an RFC 5322 message via Gmail's users.messages.send endpoint.
 
     Required arguments are caller-supplied. The dispatcher passes
     `auth0_sub` and `account_email` through so the idempotency cache
     key includes the actor partition (Decision 2: prevents cross-actor cache hits).
+
+    A reply lands in its conversation or does not send: with
+    `reply_to_message_id` the server finds the thread by searching this
+    mailbox, sets `threadId`, and compares the thread Gmail reports afterward
+    (reply_threading.py). A reply needs read access on top of gmail.send, so
+    `granted_scope` defaults to empty and fails closed; a new email needs
+    no read access and makes no extra call.
 
     Attachments accept two shapes per entry: inline
     ({filename, mime_type, data_base64url}) and upload-handle
@@ -148,19 +151,93 @@ async def send_email(
         if err is not None:
             return bad_request_error(err)
 
-    # ---- idempotency cache (READ side, BEFORE consuming any slot) ----------
     cache_obj = cache if cache is not None else default_cache
     cache_key: tuple[str, str, str] | None = None
     if idempotency_key is not None:
         if not isinstance(idempotency_key, str) or not idempotency_key:
             return bad_request_error("idempotency_key must be a non-empty string")
         cache_key = (auth0_sub, account_email, idempotency_key)
-        cached = cache_obj.get(cache_key)
-        if cached is not None:
-            # Cache hit. Do NOT call Gmail and do NOT consume any upload
-            # slot (zero POSTs, zero consumes on cache hit). The dedupe
-            # contract returns the same message ID for the TTL window.
-            return cached
+    reply_to_message_id = canonical_message_id(reply_to_message_id)
+    fingerprint = ""
+    if cache_key is not None:
+        fingerprint = request_fingerprint(
+            "send_email",
+            sender,
+            to,
+            cc,
+            bcc,
+            subject,
+            reply_to_message_id,
+            reply_to_references,
+            body_text,
+            body_html,
+            attachment_identity(attachments),
+        )
+
+    async with cache_obj.key_lock(cache_key):
+        # ---- idempotency cache (READ side, BEFORE consuming any slot) ------
+        # A true replay does NOT call Gmail and does NOT consume any upload
+        # slot (zero POSTs, zero consumes). The dedupe contract returns the
+        # same message ID for the TTL window.
+        replay = replayed_result(cache=cache_obj, key=cache_key, fingerprint=fingerprint)
+        if replay is not None:
+            return replay
+
+        result = await _send_once(
+            client=client,
+            auth0_sub=auth0_sub,
+            account_email=account_email,
+            sender=sender,
+            to=to,
+            subject=subject,
+            body_text=body_text,
+            cc=cc,
+            bcc=bcc,
+            body_html=body_html,
+            attachments=attachments,
+            reply_to_message_id=reply_to_message_id,
+            reply_to_references=reply_to_references,
+            encryption_key=encryption_key,
+            prior_encryption_keys=prior_encryption_keys,
+            granted_scope=granted_scope,
+        )
+
+        # ---- idempotency cache (WRITE side) -------------------------------
+        if cache_key is not None and cacheable_send_result(result):
+            cache_obj.set(cache_key, result, fingerprint=fingerprint)
+        return result
+
+
+async def _send_once(
+    *,
+    client: GmailClient,
+    auth0_sub: str,
+    account_email: str,
+    sender: str,
+    to: list[str],
+    subject: str,
+    body_text: str,
+    cc: list[str] | None,
+    bcc: list[str] | None,
+    body_html: str | None,
+    attachments: list[dict[str, Any]] | None,
+    reply_to_message_id: str | None,
+    reply_to_references: list[str] | None,
+    encryption_key: str | None,
+    prior_encryption_keys: tuple[str, ...],
+    granted_scope: str,
+) -> dict[str, Any]:
+    """One real attempt: check threading, build, consume slots, POST, verify."""
+    # ---- threading (BEFORE any attachment work; a refusal burns NO slot) ---
+    expected_thread = await resolve_expected_thread(
+        client=client,
+        subject=subject,
+        reply_to_message_id=reply_to_message_id,
+        reply_to_references=reply_to_references,
+        granted_scope=granted_scope,
+    )
+    if isinstance(expected_thread, dict):  # refusal
+        return expected_thread
 
     # ---- attachments: load + decrypt (NO consume yet) ---------------------
     loaded = load_attachments(
@@ -215,10 +292,8 @@ async def send_email(
 
     # ---- send (exactly one POST) ------------------------------------------
     raw_b64 = message_to_base64url(msg)
-    result = await client.send_message(raw_message=raw_b64)
-
-    # ---- idempotency cache (WRITE side) -----------------------------------
-    if cache_key is not None:
-        cache_obj.set(cache_key, result)
-
-    return result
+    try:
+        result = await client.send_message(raw_message=raw_b64, thread_id=expected_thread)
+    except GmailApiError as exc:
+        return unknown_outcome_or_raise(exc)
+    return verify_sent_thread(result, expected_thread)

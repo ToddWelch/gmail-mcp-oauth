@@ -18,13 +18,10 @@ test_gmail_tools_idempotency.py:
 
 2. Cross-tool key collision: send_email and reply_all share the
    default_cache singleton and the same key shape
-   (auth0_sub, account_email, idempotency_key). Reusing the same
-   idempotency_key across the two tools is documented as a foot-gun
-   in reply_all's tool description ("do not reuse the same
-   idempotency_key for both tools"). This test pins the actual
-   behavior so the reply_all docstring's warning matches reality:
-   the SECOND tool returns the FIRST tool's cached result, with
-   ZERO Gmail POSTs from the second tool.
+   (auth0_sub, account_email, idempotency_key). The second tool used to
+   return the first tool's cached result, reporting success for a reply
+   that never went out or met the threading checks. It is now refused,
+   with ZERO Gmail calls from the second tool.
 
 We use a fresh IdempotencyCache() per test (NOT the module-level
 default_cache) so tests do not leak state into each other. For test
@@ -42,6 +39,7 @@ import pytest
 import respx
 
 from mcp_gmail.gmail_tools import reply, send
+from mcp_gmail.gmail_tools.errors import ToolErrorCode
 from mcp_gmail.gmail_tools.gmail_client import GMAIL_API_BASE, GmailClient
 from mcp_gmail.gmail_tools.idempotency import IdempotencyCache
 
@@ -120,14 +118,11 @@ async def test_send_email_replay_after_ttl_expiry_makes_fresh_post(client):
 @pytest.mark.asyncio
 async def test_send_email_and_reply_all_collide_on_shared_idempotency_key(client):
     """When send_email and reply_all run with the same
-    (auth0_sub, account_email, idempotency_key), the SECOND tool
-    returns the FIRST tool's cached result and skips its own Gmail
-    POST entirely.
+    (auth0_sub, account_email, idempotency_key), the SECOND tool is
+    refused and makes no Gmail call at all.
 
-    This is the documented foot-gun in reply_all's tool description:
-    'do not reuse the same idempotency_key for both tools'. The test
-    pins the behavior so the warning in the description is accurate
-    (zero POSTs from the second tool, cached payload from the first).
+    It used to return the FIRST tool's cached result, which told the caller
+    a reply had gone out when it had not, past every threading check.
     """
     cache = IdempotencyCache()
 
@@ -135,15 +130,9 @@ async def test_send_email_and_reply_all_collide_on_shared_idempotency_key(client
         send_route = router.post("/users/me/messages/send").mock(
             return_value=httpx.Response(200, json={"id": "from-send", "threadId": "t1"})
         )
-        # Mounted but expected to receive zero hits from the reply_all
-        # path on the second call. reply_all also calls
-        # users/me/messages/{id} (get original) and users/me/profile
-        # (getProfile) before send; in the cache-hit path it does NOT
-        # call any of these because the cache check happens FIRST in
-        # reply_all (read reply.py: cache check is the first action
-        # before fetching the original). So we do not need to mock
-        # those routes; if reply_all ever did call them the test would
-        # fail with a respx unmatched-request error.
+        # reply_all's source-message and profile GETs are deliberately not
+        # mounted: if it read Gmail at all, respx would fail on the unmatched
+        # request. The replay check is the first thing it does.
 
         first = await send.send_email(
             client=client,
@@ -159,9 +148,7 @@ async def test_send_email_and_reply_all_collide_on_shared_idempotency_key(client
         assert send_route.call_count == 1, "first send_email should hit Gmail once"
         assert first == {"id": "from-send", "threadId": "t1"}
 
-        # Now call reply_all with the SAME idempotency_key from the
-        # SAME actor. Cache-hit path returns the send_email payload
-        # without ever calling Gmail.
+        # Now call reply_all with the SAME idempotency_key from the SAME actor.
         replied = await reply.reply_all(
             client=client,
             auth0_sub="user-a",
@@ -172,9 +159,6 @@ async def test_send_email_and_reply_all_collide_on_shared_idempotency_key(client
             cache=cache,
         )
 
-    assert send_route.call_count == 1, (
-        "reply_all unexpectedly issued a Gmail POST despite the cache hit on the shared key"
-    )
-    assert replied == {"id": "from-send", "threadId": "t1"}, (
-        f"reply_all should have returned the send_email cached payload; got {replied!r}"
-    )
+    assert send_route.call_count == 1, "reply_all must not POST on a reused key"
+    assert replied["code"] == ToolErrorCode.THREADING_REFUSED
+    assert replied["data"]["error_data"]["reason"] == "idempotency_key_reused"

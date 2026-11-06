@@ -30,11 +30,11 @@ and is updated alongside every PR that changes a tool surface.
 | Tool | Required scope | Notes |
 |------|---------------|-------|
 | `create_attachment_upload_slot` | `gmail.send` (send-capable) | Mints a one-time upload slot for a large attachment. Returns `{upload_token, upload_url, expires_at, max_bytes}`. `gmail.send`, `gmail.compose`, `gmail.modify`, or `mail.google.com/` all satisfy it (send-capable); a readonly-only link gets `scope_insufficient`. Single-use, 15-minute TTL; per-user caps of 10 active slots and 100 MiB. See "Large attachments (upload slots)" below. |
-| `send_email` | `gmail.send` | Required `body_text` (plain-text body). Optional `body_html`: when supplied, the message is `multipart/alternative` with `body_text` as the plain-text fallback part and `body_html` as the `text/html` part (sent verbatim, not escaped, so a styled `<table>` renders in the recipient's mail client); omit for plain-text only. Optional `idempotency_key`; 60s in-process dedupe keyed by `(auth0_sub, account_email, idempotency_key)`. 25 MiB encoded-size cap on the assembled message (covers text + html + attachments). Attachments accept an inline shape or an upload-handle shape (`{source:"upload", upload_token}`); upload handles are consumed on send. On a cache HIT no slot is consumed; if a send FAILS after consume, mint a fresh slot (a dead-token retry will not work). |
-| `create_draft` | `gmail.compose` | Same EmailMessage path as send_email; 25 MiB cap enforced. Optional `body_html` makes the draft `multipart/alternative` (`body_text` is the plain-text fallback part, `body_html` the `text/html` part). Optional `thread_id` sets `message.threadId` on the request, the authoritative thread join per Gmail's threading docs; header-only threading via `reply_to_message_id` / `reply_to_references` is best-effort fallback. Attachments accept the inline or upload-handle shape; upload handles are consumed when the draft is created. |
-| `update_draft` | `gmail.compose` | Full PUT replace; the body wholly replaces the prior draft. Optional `body_html` makes the draft `multipart/alternative` (same semantics as `create_draft`). Same `thread_id` parameter and semantics as `create_draft`. Attachments accept the inline or upload-handle shape; upload handles are consumed when the draft is updated. |
+| `send_email` | `gmail.send` (+ read access for a reply) | A reply lands in its conversation or does not go out; see "Reply threading" below. Required `body_text` (plain-text body). Optional `body_html`: when supplied, the message is `multipart/alternative` with `body_text` as the plain-text fallback part and `body_html` as the `text/html` part (sent verbatim, not escaped, so a styled `<table>` renders in the recipient's mail client); omit for plain-text only. Optional `idempotency_key`; 60s in-process dedupe keyed by `(auth0_sub, account_email, idempotency_key)`; reusing a key for a different message is refused. 25 MiB encoded-size cap on the assembled message (covers text + html + attachments). Attachments accept an inline shape or an upload-handle shape (`{source:"upload", upload_token}`); upload handles are consumed on send. On a cache HIT no slot is consumed; if a send FAILS after consume, mint a fresh slot (a dead-token retry will not work). |
+| `create_draft` | `gmail.compose` (+ read access for a reply) | Same EmailMessage path as send_email; 25 MiB cap enforced. Optional `body_html` makes the draft `multipart/alternative` (`body_text` is the plain-text fallback part, `body_html` the `text/html` part). With `reply_to_message_id` the server finds the thread and sets `message.threadId` itself; an optional `thread_id` that conflicts is refused (see "Reply threading"). Attachments accept the inline or upload-handle shape; upload handles are consumed when the draft is created. |
+| `update_draft` | `gmail.compose` (+ read access for a reply) | Full PUT replace; the body wholly replaces the prior draft. Optional `body_html` makes the draft `multipart/alternative` (same semantics as `create_draft`). Same `thread_id` parameter and semantics as `create_draft`. Attachments accept the inline or upload-handle shape; upload handles are consumed when the draft is updated. |
 | `list_drafts` | `gmail.compose` | Returns id stubs; follow up with read_email per id for full content. |
-| `send_draft` | `gmail.send` (+ `gmail.modify` for post-send actions) | Consumes the draft (Gmail moves it from DRAFT to SENT). optional `archive_thread`, `add_labels`, `remove_labels` apply a follow-up modify_thread to the original thread AFTER the send succeeds. Post-send actions are best-effort: send-success + action-fail returns the success record annotated with `post_send_actions.applied=false` and `action_failures`; the send is NEVER retried. Send-fail returns the existing error shape with no actions attempted. Caller must have granted gmail.modify (subsumed by gmail.modify or full); a SEND-only token plus any post-send param returns `bad_request_error` at handler entry. |
+| `send_draft` | `gmail.send` to pass the tool gate, then `gmail.compose` or read access to check the draft, read access for a reply (+ `gmail.modify` for post-send actions) | Consumes the draft (Gmail moves it from DRAFT to SENT). The draft is read and checked first; see "Reply threading". A send-only token gets `scope_insufficient`. optional `archive_thread`, `add_labels`, `remove_labels` apply a follow-up modify_thread to the original thread AFTER the send succeeds. Post-send actions are best-effort: send-success + action-fail returns the success record annotated with `post_send_actions.applied=false` and `action_failures`; the send is NEVER retried. Send-fail returns the existing error shape with no actions attempted. Caller must have granted gmail.modify (subsumed by gmail.modify or full); a SEND-only token plus any post-send param returns `bad_request_error` at handler entry. |
 | `delete_draft` | `gmail.compose` | Permanent on the draft only; no impact on sent messages. |
 | `create_label` | `gmail.modify` | System labels (INBOX, SENT, etc.) are not user-creatable. |
 | `update_label` | `gmail.modify` | System labels cannot be renamed. |
@@ -49,7 +49,7 @@ and is updated alongside every PR that changes a tool surface.
 
 | Tool | Required scope | Notes |
 |------|---------------|-------|
-| `reply_all` | `gmail.send` + `gmail.readonly` | Pass the source message via the `message_id` input field. Replies to ALL recipients on the original message (To + Cc minus self), NOT just the sender. Self resolved via `users.getProfile`; getProfile failure surfaces as `upstream_error` rather than silent fallback. Expanded recipient set capped at 100. Optional `body_html` makes the reply `multipart/alternative` (`body_text` is the plain-text fallback part, `body_html` the `text/html` part). Idempotency cache shared with `send_email` (do not reuse the same `idempotency_key` for both tools). Attachments accept the inline or upload-handle shape; upload handles are consumed on send (on a cache hit no slot is consumed). |
+| `reply_all` | `gmail.send` + `gmail.readonly` | Pass the source message via the `message_id` input field. Replies to ALL recipients on the original message (To + Cc minus self), NOT just the sender. Self resolved via `users.getProfile`; getProfile failure surfaces as `upstream_error` rather than silent fallback. Expanded recipient set capped at 100. Optional `body_html` makes the reply `multipart/alternative` (`body_text` is the plain-text fallback part, `body_html` the `text/html` part). Sets `threadId` from the source message and verifies it after the send (see "Reply threading"). Idempotency cache shared with `send_email`; reusing a key across the two tools is refused. Attachments accept the inline or upload-handle shape; upload handles are consumed on send (on a cache hit no slot is consumed). |
 | `batch_modify_emails` | `gmail.modify` | Bulk add/remove labels across up to 1000 messages in one Gmail call. Same endpoint as `batch_delete_emails` (`users.messages.batchModify`) but with caller-specified add/remove label sets. |
 | `get_or_create_label` | `gmail.modify` | Returns the existing label with the given name, or creates one if missing. TOCTOU race: if another caller creates the label between our list and our create, Gmail returns a duplicate-name 409. Name match is case-sensitive ("Important" and "important" are distinct). |
 | `create_filter_from_template` | `gmail.settings.basic` | Creates a Gmail filter from a named template. Templates: `auto_archive_sender`, `auto_label_sender`, `auto_label_from_keyword`. Empty / whitespace / single-character `query` rejected before any Gmail call (over-broad queries would label every future message). |
@@ -62,29 +62,74 @@ and is updated alongside every PR that changes a tool surface.
 | `auto_label_sender` | `from:<sender_email>` literal | Add `<label_id>` | Functionally equivalent to `auto_label_from_keyword` with a `from:` query, exposed separately because the email-address-only case is the most common and giving it a named template makes intent more discoverable. |
 | `auto_label_from_keyword` | `query:<arbitrary Gmail search syntax>` | Add `<label_id>` | Caller is responsible for query correctness. Empty / whitespace-only / single-character queries are rejected (would label every future message). Two-character minimum. |
 
-### Draft threading
+### Reply threading
 
-Gmail's API stitches a draft (or sent message) into an existing thread
-only when ALL THREE of these conditions are met
-(developers.google.com/gmail/api/guides/sending#threading):
+**A reply sent through this connector lands in the Gmail conversation it
+answers. If it cannot, it does not send.** `gmail_tools/reply_threading.py` and
+`reply_outcomes.py` enforce this for `send_email`, `reply_all`, `create_draft`,
+`update_draft` and `send_draft`.
 
-1. The requested `threadId` is set on the `Message` resource in the
-   request body. This is the authoritative join.
-2. The `In-Reply-To` and `References` headers are RFC 2822 compliant.
-3. The `Subject` header matches the existing thread's subject.
+Gmail's docs (developers.google.com/gmail/api/guides/sending#threading) list
+three requirements: `threadId` on the request, RFC 2822 `In-Reply-To` and
+`References` headers, and a matching `Subject`. Headers without `threadId` do
+not join anything: Gmail starts a new thread (confirmed live 2026-11-06, and the
+cause of that day's incident). So callers do not supply a thread for a reply:
 
-The Gmail MCP exposes all three:
+- **`send_email`, `create_draft`, `update_draft`:** `reply_to_message_id` must
+  be the RFC 5322 `Message-ID` header of the replied-to message (`<id@host>`,
+  brackets optional), not Gmail's message id. The server searches the mailbox
+  with `rfc822msgid:`, compares the header exactly, and sets `threadId` itself.
+- **`reply_all`:** uses the source message's thread.
+- **`send_draft`:** reads the draft and applies the same checks to what it
+  holds, so a draft made in the Gmail UI gets no easier path.
 
-- `thread_id` argument on `create_draft` / `update_draft` -> condition 1
-.
-- `reply_to_message_id` and `reply_to_references` -> condition 2 (set
-  via `message_format.build_email_message`).
-- `subject` argument -> condition 3 (caller supplies).
+| Refusal, nothing sent | `data.error_data.reason` | Code |
+|---|---|---|
+| Replied-to message not in this mailbox (a Gmail message id lands here) | `reply_target_not_found` | -32007 |
+| Message-ID matches more than one thread, or overflows one page of results | `reply_target_ambiguous` | -32007 |
+| Value cannot be one Message-ID (empty, spaces, unbalanced brackets) | `invalid_message_id` | -32007 |
+| Subject differs after removing `Re:`/`Fwd:` prefixes, whitespace and case; `expected_subject` is returned | `subject_mismatch` | -32007 |
+| Subject starts with `Re:`, or `reply_to_references` is set, with no `reply_to_message_id`. There is no bypass argument; a genuinely new email changes its subject | `no_reply_target` | -32007 |
+| `update_draft` on a reply draft without `reply_to_message_id` or `thread_id`. An update is a full replace, and one with no thread would pull the draft out of its conversation with success at every step | `no_reply_target` | -32007 |
+| `thread_id` disagrees with the replied-to message, or a draft's `In-Reply-To` points at a different thread than the draft's own | `thread_conflict` | -32007 |
+| Any lookup fails, including 429 and 5xx (`status`, `retry_after_seconds` returned). It never falls back to an unthreaded send | `lookup_failed` | -32007 |
+| `idempotency_key` already used for a different message (tool, sender, recipients, subject, reply target, body or attachments) | `idempotency_key_reused` | -32007 |
+| Linked account lacks the read access this check needs | `read_scope_missing` | -32004 |
 
-When `thread_id` is omitted, Gmail falls back to header-only inference
-which is best-effort and fails on edge cases (long subjects,
-mid-thread subject edits, missing References on the original
-message). For reliable thread joining always set `thread_id`.
+`reply_all` is given its source by Gmail id and reads it directly, so a failed
+read there returns the normal typed error (-32002, -32003, -32005 or -32006)
+instead of -32007. Nothing is sent either way. If the source has no `Message-ID`
+header the reply goes out with `threadId` alone and no `In-Reply-To`, which still
+lands in the sender's conversation.
+
+**After the send.** The `threadId` Gmail returns is compared with the expected
+one. A mismatch is logged at ERROR and returned as error -32008 with
+`expected_thread_id`, `actual_thread_id` and `sent_message_id`, so no caller can
+report success. The mail has already gone out, so do not resend it; a replay
+under the same key returns the same error. `send_draft` runs no post-send action
+on a mismatch. `create_draft` and `update_draft` make the same comparison on the
+saved draft and return `draft_id` instead.
+
+**Scopes.** A new email (no `reply_to_message_id`) makes no extra call and needs
+no read access. A reply needs read access (`gmail.readonly`, `gmail.modify` or
+`mail.google.com/`) on top of the tool's own scope.
+
+**When Gmail does not confirm a send.** A network error or 5xx on the POST of
+`send_email` or `reply_all` returns error -32009 (`send_outcome_unknown`), because
+Gmail may have accepted the message. Check Sent before resending. A definite 4xx
+keeps its normal typed error, since nothing went out.
+
+**`thread_id` alone** (drafts only, no `reply_to_message_id`, subject not
+starting `Re:`) is still accepted and checked against the thread Gmail reports.
+It carries no reply headers and its subject is not compared, so it lands in the
+sender's conversation but recipients' mail clients may group it separately. Pass
+`reply_to_message_id` for a real reply.
+
+**Stricter than Gmail.** Live on 2026-11-06, Gmail joined a thread when given
+`threadId` with a different subject. The subject refusal stands anyway: Gmail's
+docs require the match, and other people's mail clients group by subject and
+headers. A message that only just arrived may not be searchable yet; the
+not-found error says to retry.
 
 ### Delete-tool semantics
 
@@ -186,7 +231,7 @@ deliberate code change.
 | `tool` | yes | str | Tool name (e.g. `read_email`). |
 | `auth0_sub` | yes | str \| None | JWT sub of the human invoking the tool. |
 | `account_email` | yes | str \| None | Linked Gmail address. |
-| `outcome` | yes | str | `ok`, `error`, `needs_reauth`, `scope_insufficient`, `not_found`, `rate_limited`, `upstream_error`. |
+| `outcome` | yes | str | `ok`, `error`, `needs_reauth`, `scope_insufficient`, `not_found`, `rate_limited`, `upstream_error`, `threading_refused`, `thread_mismatch`, `send_outcome_unknown`. |
 | `message_id` | when applicable | str | Validated against Gmail ID shape; mismatches are logged at WARN level. |
 | `thread_id` | when applicable | str | Same WARN shape rule. |
 | `label_id` | when applicable | str | |
@@ -196,6 +241,8 @@ deliberate code change.
 | `mime_type` | when applicable | str | Set when an attachment was downloaded; deliberately replaces filename. |
 | `size_bytes` | when applicable | int | Set when an attachment was downloaded. |
 | `error_code` | on error outcomes | int | Stable JSON-RPC code from `errors.py::ToolErrorCode`. |
+| `reason` | on threading refusals and mismatches | str | Closed set; see "Reply threading". |
+| `actual_thread_id` | on a thread mismatch | str \| None | The thread Gmail filed the message in. `thread_id` then holds the expected one. |
 
 Fields that are NEVER logged:
 
@@ -335,10 +382,25 @@ cache miss across replicas, which matches token_store's per-key
 asyncio.Lock single-replica caveat. The mcp-gmail service deploys at
 1 replica today.
 
-Behavior under cache hit: `send_email` returns the cached Gmail
+Behavior under a true replay: `send_email` returns the cached Gmail
 response WITHOUT calling Gmail (zero POSTs). Behavior under cache
 miss: exactly one POST to `users.messages.send`, then the response is
-cached for the TTL.
+cached for the TTL. `reply_all` shares the cache and follows the same rules.
+
+- **A replay must be the same message.** Each entry stores a hash of the tool,
+  sender, recipients, subject, reply target, body and attachments. The same key on
+  anything else is refused (`idempotency_key_reused`), because returning the old
+  result would report success for a message that never went out. An upload handle's
+  one-time token is left out of the hash, because a retry legitimately carries a
+  fresh one; so a different file behind a new handle is not detected.
+- **Concurrent calls with one key are serialized** from the cache read through
+  the cache write, so a retry arriving mid-send cannot double send.
+- **What is cached:** a success, a post-send thread mismatch, and a send Gmail did
+  not confirm. In all three the mail left or may have, so a retry returns the same
+  result rather than sending, for the 60 second window. After that, or with a new
+  key, the same call sends again, so check Sent first. A threading refusal and
+  a definite 4xx from Gmail are not cached: nothing went out, so a retry under the
+  same key works.
 
 Disconnect flow calls
 `default_cache.clear_for_actor(auth0_sub=..., account_email=...)` so a

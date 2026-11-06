@@ -1,11 +1,10 @@
 """Write-side reply_all tool.
 
-Split from send.py to honor the 300-LOC per-file ceiling.
-
 Given a `message_id` already in the linked mailbox, reply to ALL
 recipients: To the original `From`; Cc the original `To` + `Cc` minus
-the linked account's own address. Threaded via `In-Reply-To` /
-`References` set to the original Message-ID; built through the same
+the linked account's own address. Threaded by the source message's
+threadId on the POST, with `In-Reply-To` / `References` set to its
+Message-ID when it has one; built through the same
 build_email_message + 25 MiB cap path send_email uses.
 
 Foot-gun mitigations: an empty expanded recipient list ->
@@ -14,9 +13,9 @@ at 100; get_user_profile failure -> upstream_error (no silent
 include-everyone fallback).
 
 Idempotency cache is shared with send_email (key = (auth0_sub,
-account_email, idempotency_key)); reusing a key across both produces a
-cache hit and skips the second tool. The cache is READ before any upload
-slot is consumed, so a cache hit consumes no slot.
+account_email, idempotency_key)); reusing a key across both is refused.
+The cache is READ before any upload slot is consumed, so a replay
+consumes no slot.
 """
 
 from __future__ import annotations
@@ -27,19 +26,25 @@ from typing import Any
 from .attachment_source import consume_slots, load_attachments
 from .errors import bad_request_error, upstream_error
 from .gmail_client import GmailApiError, GmailClient
-from .idempotency import IdempotencyCache, default_cache
+from .idempotency import IdempotencyCache, default_cache, request_fingerprint
 from .message_format import (
     InvalidHeaderValue,
     OversizeMessage,
     build_email_message,
     message_to_base64url,
 )
+from .reply_outcomes import (
+    REASON_LOOKUP_FAILED,
+    attachment_identity,
+    cacheable_send_result,
+    replayed_result,
+    threading_refused_error,
+    unknown_outcome_or_raise,
+    verify_sent_thread,
+)
 from .reply_recipients import extract_header, looks_like_email, split_address_list
 
-# Backward-compat re-exports. The recipient-computation helpers moved to
-# reply_recipients.py (300-LOC split); existing references to
-# `reply._split_address_list` / `reply._extract_header` /
-# `reply._looks_like_email` keep resolving here.
+# Backward-compat re-exports; the helpers moved to reply_recipients.py.
 _split_address_list = split_address_list
 _extract_header = extract_header
 _looks_like_email = looks_like_email
@@ -47,11 +52,8 @@ _looks_like_email = looks_like_email
 logger = logging.getLogger(__name__)
 
 
-# Hard cap mirrored from tool_schemas.EMAIL_LIST_PROP.maxItems. We
-# compute the expanded recipient list from the original message
-# headers, which Gmail accepts much larger sets in. Capping at the
-# tool surface keeps the contract symmetric with send_email's
-# explicit recipient lists.
+# Hard cap mirrored from tool_schemas.EMAIL_LIST_PROP.maxItems, so the expanded
+# list stays symmetric with send_email's explicit recipient lists.
 _MAX_EXPANDED_RECIPIENTS = 100
 
 
@@ -84,43 +86,83 @@ async def reply_all(
 
     Recipients: original `From` -> reply To; original `To` + `Cc` minus
     self (resolved via getProfile) -> reply Cc; expanded set capped at
-    _MAX_EXPANDED_RECIPIENTS (100). Threading: Subject prefixed "Re: "
-    unless already present; In-Reply-To + References set to the original
-    Message-ID (appended to any existing References chain).
+    _MAX_EXPANDED_RECIPIENTS (100). Threading: the source message's threadId
+    goes on the POST and is compared with the thread Gmail reports afterward;
+    Subject prefixed "Re: " unless already present; In-Reply-To + References
+    set to the original Message-ID (appended to any existing References chain).
 
     optional `body_html` makes the reply multipart/alternative (body_text
     is the plain-text fallback part).
     """
-    # ---- idempotency cache (READ side) ------------------------------------
     cache_obj = cache if cache is not None else default_cache
     cache_key: tuple[str, str, str] | None = None
     if idempotency_key is not None:
         if not isinstance(idempotency_key, str) or not idempotency_key:
             return bad_request_error("idempotency_key must be a non-empty string")
         cache_key = (auth0_sub, account_email, idempotency_key)
-        cached = cache_obj.get(cache_key)
-        if cached is not None:
-            return cached
+    fingerprint = ""
+    if cache_key is not None:
+        fingerprint = request_fingerprint(
+            "reply_all", message_id, body_text, body_html, attachment_identity(attachments)
+        )
 
+    async with cache_obj.key_lock(cache_key):
+        # ---- idempotency cache (READ side) --------------------------------
+        replay = replayed_result(cache=cache_obj, key=cache_key, fingerprint=fingerprint)
+        if replay is not None:
+            return replay
+
+        result = await _reply_once(
+            client=client,
+            auth0_sub=auth0_sub,
+            account_email=account_email,
+            message_id=message_id,
+            body_text=body_text,
+            body_html=body_html,
+            attachments=attachments,
+            encryption_key=encryption_key,
+            prior_encryption_keys=prior_encryption_keys,
+        )
+
+        # ---- idempotency cache (WRITE side) -------------------------------
+        if cache_key is not None and cacheable_send_result(result):
+            cache_obj.set(cache_key, result, fingerprint=fingerprint)
+        return result
+
+
+async def _reply_once(
+    *,
+    client: GmailClient,
+    auth0_sub: str,
+    account_email: str,
+    message_id: str,
+    body_text: str,
+    body_html: str | None,
+    attachments: list[dict[str, Any]] | None,
+    encryption_key: str | None,
+    prior_encryption_keys: tuple[str, ...],
+) -> dict[str, Any]:
+    """One real attempt: read the source, build, consume slots, POST, verify."""
     # ---- fetch original message (metadata is enough for headers) ----------
     # 404 / other Gmail errors propagate to the dispatcher's error mapper
-    # (route_tool catches GmailApiError and converts to a typed error
-    # dict). reply_all does not catch them locally because the only
-    # behavior we would add is "convert to not_found", and the
-    # dispatcher already does that consistently for every tool.
+    # (route_tool converts GmailApiError to a typed error dict).
     original = await client.get_message(
         message_id=message_id,
         format="metadata",
     )
+    source_thread = original.get("threadId")
+    if not isinstance(source_thread, str) or not source_thread:
+        return threading_refused_error(
+            "The message being replied to came back without a thread id.",
+            reason=REASON_LOOKUP_FAILED,
+        )
 
     # ---- fetch self email via getProfile (N1: never silent fallback) ------
     try:
         profile = await client.get_user_profile()
     except GmailApiError as exc:
-        # getProfile failure is not a caller-input bug; surface it as
-        # an upstream error rather than silently treating "self" as
-        # the empty string (which would let the linked account
-        # appear in its own reply Cc list).
+        # Not a caller-input bug. Treating "self" as empty would let the
+        # linked account appear in its own reply Cc list.
         return upstream_error(
             f"could not fetch user profile to compute reply-all recipients: {exc}",
             status=exc.status if exc.status else None,
@@ -250,10 +292,8 @@ async def reply_all(
 
     # ---- send (exactly one POST) ------------------------------------------
     raw_b64 = message_to_base64url(msg)
-    result = await client.send_message(raw_message=raw_b64)
-
-    # ---- idempotency cache (WRITE side) -----------------------------------
-    if cache_key is not None:
-        cache_obj.set(cache_key, result)
-
-    return result
+    try:
+        result = await client.send_message(raw_message=raw_b64, thread_id=source_thread)
+    except GmailApiError as exc:
+        return unknown_outcome_or_raise(exc)
+    return verify_sent_thread(result, source_thread)
