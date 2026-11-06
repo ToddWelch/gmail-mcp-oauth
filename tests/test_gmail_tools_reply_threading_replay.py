@@ -232,6 +232,23 @@ async def test_an_unconfirmed_send_replays_as_an_error_and_never_resends(client,
 
 
 @pytest.mark.asyncio
+async def test_a_2xx_with_an_unreadable_body_replays_as_an_error_and_never_resends(client):
+    """The status says Gmail accepted it, so this is the likeliest duplicate of all."""
+    cache = IdempotencyCache()
+    with respx.mock(base_url=GMAIL_API_BASE, assert_all_called=False) as router:
+        mount_lookup(router, message_metadata())
+        send_route = router.post("/users/me/messages/send").mock(
+            return_value=httpx.Response(200, text="<html>not json</html>")
+        )
+        first = await _send(client, cache)
+        second = await _send(client, cache)
+
+    assert send_route.call_count == 1
+    assert first["code"] == ToolErrorCode.SEND_OUTCOME_UNKNOWN
+    assert second == first
+
+
+@pytest.mark.asyncio
 async def test_a_new_key_after_an_unconfirmed_send_sends_again_by_choice(client):
     cache = IdempotencyCache()
     with respx.mock(base_url=GMAIL_API_BASE, assert_all_called=False) as router:

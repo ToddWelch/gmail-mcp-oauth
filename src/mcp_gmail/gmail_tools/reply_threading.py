@@ -115,7 +115,7 @@ def lookup_failed(detail: str, *, exc: GmailApiError | None = None) -> dict[str,
         if exc.retry_after_seconds is not None:
             details["retry_after_seconds"] = exc.retry_after_seconds
         if exc.status in (401, 403):
-            next_step = "Re-link the account at /oauth/start; retrying will not help."
+            next_step = "If this keeps happening, re-link the account at /oauth/start."
     return threading_refused_error(
         f"Could not confirm the conversation for this reply ({detail}). {next_step}",
         reason=REASON_LOOKUP_FAILED,

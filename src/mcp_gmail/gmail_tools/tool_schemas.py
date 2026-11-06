@@ -134,7 +134,7 @@ THREAD_MISMATCH_NOTE: str = (
 SEND_RESULT_NOTE: str = THREAD_MISMATCH_NOTE + (
     " If Gmail does not confirm the send (network error or 5xx), the result is error -32009: "
     "it may have gone out, so check Sent before resending. A retry with the same "
-    "idempotency_key returns that error without sending."
+    "idempotency_key within 60 seconds returns that error without sending."
 )
 
 UPDATE_DRAFT_THREADING_NOTE: str = (

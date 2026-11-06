@@ -200,7 +200,7 @@ async def test_a_failed_search_refuses_and_never_sends_unthreaded(client, status
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("status", "hint"), [(401, "Re-link"), (403, "Re-link"), (503, "Retry")])
+@pytest.mark.parametrize(("status", "hint"), [(401, "re-link"), (403, "re-link"), (503, "Retry")])
 async def test_a_failed_search_says_what_will_actually_help(client, status, hint):
     with respx.mock(base_url=GMAIL_API_BASE, assert_all_called=False) as router:
         router.get("/users/me/messages").mock(return_value=httpx.Response(status, json={}))

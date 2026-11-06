@@ -111,7 +111,8 @@ async def test_send_email_reply_posts_the_resolved_thread_id(client):
         result = await _send_reply(client)
 
     body = posted_body(send_route)
-    # Exact field set pins the accepted contract. Last verified live 2026-11-06.
+    # Exact field set pins the accepted contract. Proved live by the post-deploy
+    # proof recorded on PR #33.
     assert set(body) == {"raw", "threadId"}
     assert body["threadId"] == TARGET_THREAD
     assert result["threadId"] == TARGET_THREAD
@@ -135,9 +136,9 @@ async def test_reply_all_posts_the_source_thread_id(client):
 
 @pytest.mark.asyncio
 async def test_lookup_uses_the_confirmed_search_form(client):
-    """Exact query shape. Last verified live 2026-11-06: rfc822msgid matches the
-    whole id only (a partial id returns nothing), and Spam and Trash need the
-    explicit flag to count as 'in the mailbox'."""
+    """Exact query shape. Verified live 2026-11-06: rfc822msgid matches the whole id
+    only (a partial id returns nothing). The Spam and Trash flag is sent per Gmail's
+    docs; a target actually in Spam or Trash has not been exercised live."""
     with respx.mock(base_url=GMAIL_API_BASE, assert_all_called=False) as router:
         search = mount_lookup(router, message_metadata())
         mount_send(router)

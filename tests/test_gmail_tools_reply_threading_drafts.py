@@ -104,6 +104,21 @@ async def test_update_draft_resolves_the_thread_when_only_the_message_id_is_give
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("form", ["parent-1@mail.example.com", "  <parent-1@mail.example.com>  "])
+async def test_every_accepted_id_form_emits_a_clean_header_on_a_draft(client, form):
+    with respx.mock(base_url=GMAIL_API_BASE, assert_all_called=False) as router:
+        mount_lookup(router, message_metadata())
+        created = router.post("/users/me/drafts").mock(return_value=_saved())
+        updated = router.put("/users/me/drafts/d1").mock(return_value=_saved())
+        await _create(client, reply_to_message_id=form)
+        await _update(client, reply_to_message_id=form)
+
+    for route in (created, updated):
+        message = json.loads(route.calls[0].request.content)["message"]
+        assert decode_raw(message)["In-Reply-To"] == TARGET_RFC_ID
+
+
+@pytest.mark.asyncio
 async def test_create_draft_accepts_a_thread_id_that_agrees(client):
     with respx.mock(base_url=GMAIL_API_BASE, assert_all_called=False) as router:
         mount_lookup(router, message_metadata())

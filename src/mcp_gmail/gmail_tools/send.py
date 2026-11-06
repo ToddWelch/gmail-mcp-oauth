@@ -61,8 +61,7 @@ from .attachment_source import (  # noqa: F401
 logger = logging.getLogger(__name__)
 
 
-# Minimum syntactic check: localpart@domain with at least 1 char each.
-# Gmail will reject anything more nuanced; we only catch the obvious.
+# localpart@domain with at least 1 char each; Gmail rejects anything subtler.
 def _looks_like_email(addr: str) -> bool:
     if not isinstance(addr, str):
         return False

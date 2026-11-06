@@ -397,7 +397,8 @@ cached for the TTL. `reply_all` shares the cache and follows the same rules.
   the cache write, so a retry arriving mid-send cannot double send.
 - **What is cached:** a success, a post-send thread mismatch, and a send Gmail did
   not confirm. In all three the mail left or may have, so a retry returns the same
-  result rather than sending. Only a new key sends again. A threading refusal and
+  result rather than sending, for the 60 second window. After that, or with a new
+  key, the same call sends again, so check Sent first. A threading refusal and
   a definite 4xx from Gmail are not cached: nothing went out, so a retry under the
   same key works.
 

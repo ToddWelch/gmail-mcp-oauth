@@ -105,17 +105,19 @@ def unknown_outcome_or_raise(exc: GmailApiError) -> dict[str, Any]:
     """Classify a failed send POST: raises a definite failure, returns an unknown one.
 
     A 4xx means Gmail refused the message, so it stays retryable and goes to the
-    dispatcher's normal error mapping. A network error or a 5xx may have happened
-    after Gmail accepted it, so resending could mail a real person twice. That
-    result is returned for the caller to see and for a replay to repeat.
+    dispatcher's normal error mapping. Anything else may have happened after Gmail
+    accepted it, so resending could mail a real person twice: a network error, a
+    5xx, or a 2xx whose body could not be read. That result is returned for the
+    caller to see and for a replay to repeat.
     """
-    if 0 < exc.status < 500:
+    if 400 <= exc.status < 500:
         raise exc
     return tool_error(
         ToolErrorCode.SEND_OUTCOME_UNKNOWN,
         f"Gmail did not confirm this send (status {exc.status}), so it may or may not have "
         "gone out. Check the Sent folder before resending. Retrying with the same "
-        "idempotency_key returns this error without sending; a new key sends again.",
+        "idempotency_key within 60 seconds returns this error without sending; after that, "
+        "or with a new key, it sends again.",
         error_data={"reason": REASON_SEND_OUTCOME_UNKNOWN, "status": exc.status},
     )
 
