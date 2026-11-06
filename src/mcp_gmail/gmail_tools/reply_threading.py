@@ -217,12 +217,12 @@ async def resolve_expected_thread(
         return target
 
     if normalize_subject(subject) != normalize_subject(target.subject):
-        # Goes only to the caller, who owns this mailbox; never to the log. It is in the
-        # message too, because some MCP clients show the message and drop error data.
+        # The replied-to subject is text an outside sender wrote, and agents act on what
+        # this message says, so it must never go in the message: a hostile subject would
+        # read as the connector's own instruction. It stays a labelled field in error data.
         return threading_refused_error(
             "The subject does not match the message being replied to, so Gmail could start "
-            f'a new conversation. Its subject is "{target.subject}"; use that, with or '
-            "without Re:.",
+            "a new conversation. Read that message and reuse its Subject, with or without Re:.",
             reason=REASON_SUBJECT_MISMATCH,
             expected_subject=target.subject,
             thread_id=target.thread_id,

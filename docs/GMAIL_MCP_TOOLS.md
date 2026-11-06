@@ -88,7 +88,7 @@ cause of that day's incident). So callers do not supply a thread for a reply:
 | Replied-to message not in this mailbox (a Gmail message id lands here) | `reply_target_not_found` | -32007 |
 | Message-ID matches more than one thread, or overflows one page of results | `reply_target_ambiguous` | -32007 |
 | Value cannot be one Message-ID (empty, spaces, unbalanced brackets) | `invalid_message_id` | -32007 |
-| Subject differs after removing `Re:`/`Fwd:` prefixes, whitespace and case; the replied-to subject is in the message and `expected_subject` | `subject_mismatch` | -32007 |
+| Subject differs after removing `Re:`/`Fwd:` prefixes, whitespace and case. The replied-to subject is returned as `expected_subject` in error data and never in the message, because an outside sender wrote it and agents act on what the message says | `subject_mismatch` | -32007 |
 | Subject starts with `Re:`, or `reply_to_references` is set, with no `reply_to_message_id`. There is no bypass argument; a genuinely new email changes its subject | `no_reply_target` | -32007 |
 | `update_draft` on a reply draft without `reply_to_message_id` or `thread_id`. An update is a full replace, and one with no thread would pull the draft out of its conversation with success at every step | `no_reply_target` | -32007 |
 | `thread_id` disagrees with the replied-to message, or a draft's `In-Reply-To` points at a different thread than the draft's own | `thread_conflict` | -32007 |
