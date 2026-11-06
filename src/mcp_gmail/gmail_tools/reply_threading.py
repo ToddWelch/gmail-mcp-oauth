@@ -217,10 +217,12 @@ async def resolve_expected_thread(
         return target
 
     if normalize_subject(subject) != normalize_subject(target.subject):
-        # Goes only to the caller, who owns this mailbox; never to the log.
+        # Goes only to the caller, who owns this mailbox; never to the log. It is in the
+        # message too, because some MCP clients show the message and drop error data.
         return threading_refused_error(
             "The subject does not match the message being replied to, so Gmail could start "
-            "a new conversation. Use the expected_subject, with or without Re:.",
+            f'a new conversation. Its subject is "{target.subject}"; use that, with or '
+            "without Re:.",
             reason=REASON_SUBJECT_MISMATCH,
             expected_subject=target.subject,
             thread_id=target.thread_id,

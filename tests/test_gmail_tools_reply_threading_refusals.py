@@ -127,6 +127,8 @@ async def test_refuses_on_subject_mismatch_and_names_the_expected_subject(client
     assert result["code"] == ToolErrorCode.THREADING_REFUSED
     assert error_reason(result) == "subject_mismatch"
     assert result["data"]["error_data"]["expected_subject"] == TARGET_SUBJECT
+    # Some MCP clients show only the message (seen live 2026-11-06), so it must carry this.
+    assert f'"{TARGET_SUBJECT}"' in result["message"]
 
 
 @pytest.mark.asyncio
