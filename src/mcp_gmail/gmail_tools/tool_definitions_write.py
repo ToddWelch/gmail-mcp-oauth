@@ -1,9 +1,7 @@
 """TOOL_DEFINITIONS_WRITE: JSON Schema manifest for the write-side tools.
 
 Imported and concatenated by gmail_tools/__init__.py so the public
-TOOL_DEFINITIONS list stays a single ordered list. Split across this
-file (8 send/draft/upload tools) and tool_definitions_admin.py (11
-admin tools) purely to honor the 300-LOC-per-file rule.
+TOOL_DEFINITIONS list stays a single ordered list.
 
 Tool names MUST match the names registered in tool_router_write.py (or
 the dispatch short-circuits) and scope_check.py's
@@ -22,6 +20,11 @@ from .tool_schemas import (
     ATTACHMENT_PROP,
     EMAIL_LIST_PROP,
     LABEL_ID_LIST_PROP,
+    REPLY_THREADING_NOTE,
+    SEND_DRAFT_THREADING_NOTE,
+    SEND_RESULT_NOTE,
+    THREAD_MISMATCH_NOTE,
+    UPDATE_DRAFT_THREADING_NOTE,
 )
 
 
@@ -50,16 +53,13 @@ _DRAFT_BODY_PROPS: dict[str, Any] = {
 }
 
 
-# Gmail's authoritative thread join. Per Gmail API threading docs
-# (developers.google.com/gmail/api/guides/sending#threading) adding a
-# draft to an existing thread requires THREE conditions: the requested
-# threadId on the Message resource, the In-Reply-To / References headers
-# (set via reply_to_message_id / reply_to_references), and a matching
-# Subject. Header inference alone is best-effort fallback; threadId is
-# the explicit join. Applied only to create_draft and update_draft (not
-# send_email) per the design contract. Schema-layer regex matches
-# gmail_id._VALIDATION_PATTERN so the parity sweep auto-covers
-# the new field.
+# Gmail API threading docs (developers.google.com/gmail/api/guides/sending#threading)
+# require the requested threadId, In-Reply-To / References headers and a matching
+# Subject. Headers alone do NOT join: without threadId Gmail starts a new thread. So
+# for every reply, send_email included, the server resolves threadId itself from
+# reply_to_message_id (reply_threading.py). This caller-facing argument exists only on
+# create_draft and update_draft, where it is checked against that resolved thread.
+# Schema-layer regex matches gmail_id._VALIDATION_PATTERN (parity sweep covers it).
 _THREAD_ID_PROP: dict[str, Any] = {
     "type": "string",
     "minLength": 1,
@@ -76,10 +76,12 @@ _SEND_EMAIL_DEF: dict[str, Any] = {
         "users.messages.send. Pass `body_html` for an HTML body "
         "(multipart/alternative; body_text is the plain-text fallback). "
         "Optional `idempotency_key` dedupes retries in a 60s window "
-        "keyed by (account, key). Attachments accept an inline shape "
-        "or an upload-handle shape "
+        "keyed by (account, key); reusing a key for a different message is "
+        "refused. Attachments accept an inline shape or an upload-handle shape "
         "({source:'upload', upload_token}); handles are consumed on send, "
         "so a send that fails after consume needs a fresh slot, not a retry."
+        + REPLY_THREADING_NOTE
+        + SEND_RESULT_NOTE
     ),
     "inputSchema": {
         "type": "object",
@@ -98,12 +100,10 @@ _CREATE_DRAFT_DEF: dict[str, Any] = {
     "description": (
         "Create a Gmail draft. Builds the message via the same "
         "EmailMessage path send_email uses (25 MiB cap enforced; "
-        "`body_html` for an HTML body). Returns the draft id. Optional "
-        "`thread_id` sets the authoritative thread join on the underlying "
-        "Gmail message; header-only threading via reply_to_message_id / "
-        "reply_to_references is best-effort fallback. Attachments accept "
-        "the inline or upload-handle shape; upload handles are consumed "
-        "when the draft is created."
+        "`body_html` for an HTML body). Returns the draft id. Attachments "
+        "accept the inline or upload-handle shape; upload handles are consumed "
+        "when the draft is created. Optional `thread_id` is refused if it "
+        "conflicts with reply_to_message_id." + REPLY_THREADING_NOTE
     ),
     "inputSchema": {
         "type": "object",
@@ -122,12 +122,10 @@ _UPDATE_DRAFT_DEF: dict[str, Any] = {
     "description": (
         "Replace the contents of an existing draft. Gmail's update "
         "is a full PUT; the body wholly replaces the prior draft "
-        "(`body_html` for an HTML body). Optional `thread_id` sets the "
-        "authoritative thread join on the underlying Gmail message; "
-        "header-only threading via reply_to_message_id / "
-        "reply_to_references is best-effort fallback. Attachments accept "
-        "the inline or upload-handle shape; upload handles are consumed "
-        "when the draft is updated."
+        "(`body_html` for an HTML body). Attachments accept the inline or "
+        "upload-handle shape; upload handles are consumed when the draft is "
+        "updated. Optional `thread_id` is refused if it conflicts with "
+        "reply_to_message_id." + REPLY_THREADING_NOTE + UPDATE_DRAFT_THREADING_NOTE
     ),
     "inputSchema": {
         "type": "object",
@@ -178,7 +176,7 @@ _LIST_DRAFTS_DEF: dict[str, Any] = {
 _SEND_DRAFT_DEF: dict[str, Any] = {
     "name": "send_draft",
     "description": (
-        "Send an existing draft. Requires gmail.send scope. Consumes "
+        "Send an existing draft. Consumes "
         "the draft. optional archive_thread, add_labels, "
         "remove_labels apply a follow-up modify_thread to the original "
         "thread AFTER the send succeeds (post-send actions are "
@@ -187,6 +185,8 @@ _SEND_DRAFT_DEF: dict[str, Any] = {
         "retried). Send-fail returns the existing error shape with no "
         "actions attempted. Caller must have granted gmail.modify in "
         "addition to gmail.send for post-send actions."
+        + SEND_DRAFT_THREADING_NOTE
+        + THREAD_MISMATCH_NOTE
     ),
     "inputSchema": {
         "type": "object",
@@ -238,12 +238,12 @@ _REPLY_ALL_DEF: dict[str, Any] = {
         "resolved via Gmail's getProfile so the linked mailbox does "
         "not appear in its own reply Cc list. The expanded recipient "
         "set is capped at 100 (`body_html` for an HTML body). "
-        "Idempotency cache is shared "
-        "with send_email; do not reuse the same idempotency_key for both "
-        "tools. Subject is prefixed with 'Re: ' unless it already "
-        "starts with 'Re:'. Requires gmail.send scope. Attachments "
+        "Idempotency cache is shared with send_email; reusing a key across "
+        "the two tools is refused. Subject is prefixed with 'Re: ' unless it "
+        "already starts with 'Re:'. Always lands in the source message's "
+        "thread. Requires gmail.send and read access. Attachments "
         "accept the inline or upload-handle shape; upload handles are "
-        "single-use and consumed on send (re-mint if a send fails)."
+        "single-use and consumed on send (re-mint if a send fails)." + SEND_RESULT_NOTE
     ),
     "inputSchema": {
         "type": "object",

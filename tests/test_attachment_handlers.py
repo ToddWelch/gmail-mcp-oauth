@@ -25,6 +25,8 @@ from mcp_gmail.gmail_tools.gmail_client import GMAIL_API_BASE, GmailClient
 from mcp_gmail.gmail_tools.idempotency import IdempotencyCache
 from mcp_gmail.gmail_tools.tool_router import route_tool
 
+from ._threading_fixtures import SCOPES_FULL_ACCESS, message_metadata, mount_lookup
+
 SUB = "u"
 EMAIL = "me@example.com"
 
@@ -274,6 +276,8 @@ async def test_send_email_malformed_header_maps_to_bad_request_no_consume(client
     # consume, so no POST is made and the slot is not burned (not a raw 500).
     token = _upload_slot(b"PDFBYTES")
     with respx.mock(base_url=GMAIL_API_BASE, assert_all_called=False) as router:
+        # The reply target resolves, so the failure is the build's.
+        mount_lookup(router, message_metadata(rfc_id="<m1@example.com>", subject="hi"))
         route = router.post("/users/me/messages/send").mock(
             return_value=httpx.Response(200, json={"id": "s1"})
         )
@@ -286,9 +290,10 @@ async def test_send_email_malformed_header_maps_to_bad_request_no_consume(client
             subject="hi",
             body_text="b",
             attachments=[_upload_att(token)],
-            reply_to_message_id="m1",
+            reply_to_message_id="<m1@example.com>",
             reply_to_references=_BAD_REFS,
             encryption_key=_key(),
+            granted_scope=SCOPES_FULL_ACCESS,
         )
     assert route.call_count == 0  # build failed -> NO send
     assert r["code"] == ToolErrorCode.BAD_REQUEST
@@ -301,8 +306,14 @@ async def test_send_email_malformed_header_maps_to_bad_request_no_consume(client
 async def test_create_draft_malformed_header_maps_to_bad_request_no_consume(client):
     # FIX-C via the shared _build_raw_message (also covers update_draft's site).
     token = _upload_slot(b"PDFBYTES")
-    args = {**_draft_args(token), "reply_to_message_id": "m1", "reply_to_references": _BAD_REFS}
+    args = {
+        **_draft_args(token),
+        "reply_to_message_id": "<m1@example.com>",
+        "reply_to_references": _BAD_REFS,
+    }
     with respx.mock(base_url=GMAIL_API_BASE, assert_all_called=False) as router:
+        # The reply target resolves, so the failure is the build's.
+        mount_lookup(router, message_metadata(rfc_id="<m1@example.com>", subject="hi"))
         route = router.post("/users/me/drafts").mock(
             return_value=httpx.Response(200, json={"id": "d1"})
         )
@@ -312,6 +323,7 @@ async def test_create_draft_malformed_header_maps_to_bad_request_no_consume(clie
             client=client,
             auth0_sub=SUB,
             account_email=EMAIL,
+            granted_scope=SCOPES_FULL_ACCESS,
             settings=config_module.load(),
         )
     assert route.call_count == 0  # build failed -> NO draft POST

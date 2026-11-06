@@ -12,6 +12,14 @@ from mcp_gmail.gmail_tools import drafts
 from mcp_gmail.gmail_tools.errors import ToolErrorCode
 from mcp_gmail.gmail_tools.gmail_client import GMAIL_API_BASE, GmailClient
 
+from ._threading_fixtures import (
+    SCOPES_FULL_ACCESS,
+    message_metadata,
+    mount_draft,
+    mount_fresh_draft,
+    mount_lookup,
+)
+
 
 @pytest.fixture
 async def client():
@@ -84,6 +92,7 @@ async def test_update_draft_uses_PUT(client):
         return httpx.Response(200, json={"id": "d1"})
 
     with respx.mock(base_url=GMAIL_API_BASE) as router:
+        mount_fresh_draft(router)
         router.put("/users/me/drafts/d1").mock(side_effect=handler)
         r = await drafts.update_draft(
             client=client,
@@ -99,7 +108,9 @@ async def test_update_draft_uses_PUT(client):
 
 @pytest.mark.asyncio
 async def test_update_draft_404(client):
+    """The draft disappears between the check and the PUT."""
     with respx.mock(base_url=GMAIL_API_BASE) as router:
+        mount_fresh_draft(router, draft_id="missing")
         router.put("/users/me/drafts/missing").mock(return_value=httpx.Response(404, json={}))
         r = await drafts.update_draft(
             client=client,
@@ -151,20 +162,25 @@ async def test_send_draft_posts_id_in_body(client):
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured["body"] = json.loads(request.read().decode())
-        return httpx.Response(200, json={"id": "sent-1"})
+        return httpx.Response(200, json={"id": "sent-1", "threadId": "T-own"})
 
     with respx.mock(base_url=GMAIL_API_BASE) as router:
+        mount_draft(router, thread_id="T-own")
         router.post("/users/me/drafts/send").mock(side_effect=handler)
-        r = await drafts.send_draft(client=client, draft_id="d1")
+        r = await drafts.send_draft(client=client, draft_id="d1", granted_scope=SCOPES_FULL_ACCESS)
     assert captured["body"] == {"id": "d1"}
     assert r["id"] == "sent-1"
 
 
 @pytest.mark.asyncio
 async def test_send_draft_404(client):
+    """The draft disappears between the check and the send."""
     with respx.mock(base_url=GMAIL_API_BASE) as router:
+        mount_draft(router, draft_id="missing")
         router.post("/users/me/drafts/send").mock(return_value=httpx.Response(404, json={}))
-        r = await drafts.send_draft(client=client, draft_id="missing")
+        r = await drafts.send_draft(
+            client=client, draft_id="missing", granted_scope=SCOPES_FULL_ACCESS
+        )
     assert r["code"] == ToolErrorCode.NOT_FOUND
 
 
@@ -290,6 +306,7 @@ async def test_update_draft_omits_threadid_when_not_provided(client):
         return httpx.Response(200, json={"id": "d1"})
 
     with respx.mock(base_url=GMAIL_API_BASE) as router:
+        mount_fresh_draft(router)
         router.put("/users/me/drafts/d1").mock(side_effect=handler)
         await drafts.update_draft(
             client=client,
@@ -328,9 +345,17 @@ async def test_create_draft_three_legged_threading_request_body(client):
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured["body"] = json.loads(request.read().decode())
-        return httpx.Response(200, json={"id": "d1"})
+        return httpx.Response(
+            200, json={"id": "d1", "message": {"id": "M1", "threadId": "T-three-legged"}}
+        )
 
     with respx.mock(base_url=GMAIL_API_BASE) as router:
+        mount_lookup(
+            router,
+            message_metadata(
+                thread_id="T-three-legged", rfc_id="<orig@example.com>", subject="hello"
+            ),
+        )
         router.post("/users/me/drafts").mock(side_effect=handler)
         await drafts.create_draft(
             client=client,
@@ -341,6 +366,7 @@ async def test_create_draft_three_legged_threading_request_body(client):
             reply_to_message_id="<orig@example.com>",
             reply_to_references=["<orig@example.com>"],
             thread_id="T-three-legged",
+            granted_scope=SCOPES_FULL_ACCESS,
         )
     body = captured["body"]
     # Leg 1: threadId on the Message resource.
@@ -544,6 +570,7 @@ async def test_update_draft_body_html_is_multipart_alternative_raw_html(client):
         return httpx.Response(200, json={"id": "d1", "message": {"id": "M1"}})
 
     with respx.mock(base_url=GMAIL_API_BASE) as router:
+        mount_fresh_draft(router)
         router.put("/users/me/drafts/d1").mock(side_effect=handler)
         r = await drafts.update_draft(
             client=client,

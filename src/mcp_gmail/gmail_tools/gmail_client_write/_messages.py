@@ -31,13 +31,38 @@ class _MessagesWriteMixin:
         # actual upstream calls makes the read-only audit story tighter.
         return await self._get("/users/me/profile")
 
+    async def find_messages_by_rfc822_id(
+        self, *, rfc822_id: str, max_results: int
+    ) -> dict[str, Any]:
+        # Used only by the write-side reply check, so it lives here for the
+        # same reason get_user_profile does. Spam and Trash are included
+        # because a message there is still in the mailbox and a reply to it
+        # still has a conversation to land in. `rfc822_id` is bare, with no
+        # double quotes (reply_threading.bare_message_id guarantees it).
+        return await self._get(
+            "/users/me/messages",
+            params={
+                "q": f'rfc822msgid:"{rfc822_id}"',
+                "includeSpamTrash": "true",
+                "maxResults": max_results,
+            },
+        )
+
     # ---- write: messages ----------------------------------------------------
 
-    async def send_message(self, *, raw_message: str) -> dict[str, Any]:
-        return await self._post(
-            "/users/me/messages/send",
-            body={"raw": raw_message},
-        )
+    async def send_message(
+        self,
+        *,
+        raw_message: str,
+        thread_id: str | None = None,
+    ) -> dict[str, Any]:
+        # threadId is what actually joins a conversation: without it Gmail
+        # starts a new thread whatever the In-Reply-To headers say. Omitted
+        # entirely for a new conversation.
+        body: dict[str, Any] = {"raw": raw_message}
+        if thread_id is not None:
+            body["threadId"] = validate_gmail_id(thread_id, field="thread_id")
+        return await self._post("/users/me/messages/send", body=body)
 
     async def trash_message(self, *, message_id: str) -> dict[str, Any]:
         # gmail.modify scope: recoverable. Used by the `delete_email`

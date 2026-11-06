@@ -52,13 +52,11 @@ async def route_write_tool(
 ) -> dict[str, Any]:
     """Dispatch the write tools. Returns _NOT_HANDLED on miss.
 
-    The validation helpers are passed in by the caller rather than
-    imported, so this module avoids a name clash with tool_router and
-    keeps the helpers' single home.
+    The validation helpers are passed in by the caller, keeping their single home.
 
-    `granted_scope` is forwarded so the send_draft branch can
-    reject post-send actions when the caller granted only gmail.send
-    (no gmail.modify) at handler entry, before any Gmail HTTP call.
+    `granted_scope` is forwarded so the send and draft branches can refuse
+    at handler entry, before any send: post-send actions without gmail.modify,
+    or a reply without the read access its thread lookup needs.
 
     `settings` is forwarded so the create_attachment_upload_slot branch
     can build the upload URL and so the send/draft/reply branches can
@@ -102,6 +100,7 @@ async def route_write_tool(
             idempotency_key=optional_str(arguments, "idempotency_key"),
             encryption_key=enc_key,
             prior_encryption_keys=prior_keys,
+            granted_scope=granted_scope,
         )
 
     if tool_name == "create_draft":
@@ -127,12 +126,11 @@ async def route_write_tool(
             attachments=atts or None,
             reply_to_message_id=optional_str(arguments, "reply_to_message_id"),
             reply_to_references=optional_str_list(arguments, "reply_to_references"),
-            # optional Gmail-API threadId. None when omitted so
-            # the request body stays exactly the prior shape (back-compat).
             thread_id=optional_str(arguments, "thread_id"),
             auth0_sub=auth0_sub,
             account_email=account_email,
             consume_token_hashes=token_hashes,
+            granted_scope=granted_scope,
         )
 
     if tool_name == "update_draft":
@@ -159,12 +157,11 @@ async def route_write_tool(
             attachments=atts or None,
             reply_to_message_id=optional_str(arguments, "reply_to_message_id"),
             reply_to_references=optional_str_list(arguments, "reply_to_references"),
-            # optional Gmail-API threadId. None when omitted so
-            # the request body stays exactly the prior shape (back-compat).
             thread_id=optional_str(arguments, "thread_id"),
             auth0_sub=auth0_sub,
             account_email=account_email,
             consume_token_hashes=token_hashes,
+            granted_scope=granted_scope,
         )
 
     if tool_name == "list_drafts":

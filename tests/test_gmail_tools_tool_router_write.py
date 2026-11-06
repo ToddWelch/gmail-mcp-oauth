@@ -21,6 +21,8 @@ from mcp_gmail.gmail_tools.errors import ToolErrorCode
 from mcp_gmail.gmail_tools.gmail_client import GMAIL_API_BASE, GmailClient
 from mcp_gmail.gmail_tools.tool_router import route_tool
 
+from ._threading_fixtures import SCOPES_FULL_ACCESS, mount_draft, mount_fresh_draft
+
 
 @pytest.fixture
 async def client():
@@ -75,6 +77,7 @@ async def test_route_create_draft(client):
 @pytest.mark.asyncio
 async def test_route_update_draft(client):
     with respx.mock(base_url=GMAIL_API_BASE) as router:
+        mount_fresh_draft(router)
         router.put("/users/me/drafts/d1").mock(return_value=httpx.Response(200, json={"id": "d1"}))
         r = await route_tool(
             tool_name="update_draft",
@@ -101,10 +104,16 @@ async def test_route_list_drafts(client):
 @pytest.mark.asyncio
 async def test_route_send_draft(client):
     with respx.mock(base_url=GMAIL_API_BASE) as router:
+        mount_draft(router, thread_id="T-own")
         router.post("/users/me/drafts/send").mock(
-            return_value=httpx.Response(200, json={"id": "x"})
+            return_value=httpx.Response(200, json={"id": "x", "threadId": "T-own"})
         )
-        r = await route_tool(tool_name="send_draft", arguments={"draft_id": "d1"}, client=client)
+        r = await route_tool(
+            tool_name="send_draft",
+            arguments={"draft_id": "d1"},
+            client=client,
+            granted_scope=SCOPES_FULL_ACCESS,
+        )
     assert r["id"] == "x"
 
 
@@ -329,7 +338,7 @@ async def test_route_reply_all(client):
             return_value=httpx.Response(200, json={"emailAddress": "me@x.com"})
         )
         router.post("/users/me/messages/send").mock(
-            return_value=httpx.Response(200, json={"id": "sent-1"})
+            return_value=httpx.Response(200, json={"id": "sent-1", "threadId": "T"})
         )
         r = await route_tool(
             tool_name="reply_all",
@@ -438,7 +447,7 @@ async def test_route_create_draft_with_thread_id_sets_threadid_on_message(client
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured["body"] = json.loads(request.read().decode())
-        return httpx.Response(200, json={"id": "d1"})
+        return httpx.Response(200, json={"id": "d1", "message": {"threadId": "T-router-create"}})
 
     with respx.mock(base_url=GMAIL_API_BASE) as router:
         router.post("/users/me/drafts").mock(side_effect=handler)
@@ -464,7 +473,7 @@ async def test_route_update_draft_with_thread_id_sets_threadid_on_message(client
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured["body"] = json.loads(request.read().decode())
-        return httpx.Response(200, json={"id": "d1"})
+        return httpx.Response(200, json={"id": "d1", "message": {"threadId": "T-router-update"}})
 
     with respx.mock(base_url=GMAIL_API_BASE) as router:
         router.put("/users/me/drafts/d1").mock(side_effect=handler)

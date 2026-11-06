@@ -1,9 +1,7 @@
 """Per-tool OAuth scope requirements + scope-set comparison.
 
 Default linked-account scope (config.gmail_oauth_scopes) is narrow:
-openid + email + gmail.readonly. Write tools require broader scopes
-(gmail.modify, gmail.send, gmail.compose, gmail.settings.basic,
-mail.google.com/).
+openid + email + gmail.readonly. Write tools require broader scopes.
 
 This module: given a tool name and the granted scope string, decide
 whether the operation is authorized. If not, raise ScopeInsufficient
@@ -129,6 +127,8 @@ TOOL_SCOPE_REQUIREMENTS: dict[str, tuple[str, ...]] = {
     # Sending and drafting
     # create_attachment_upload_slot: SCOPE_SEND (send-capable; readonly-only rejected).
     "create_attachment_upload_slot": (SCOPE_SEND,),
+    # A reply also needs read access; checked per call in reply_threading.py so a
+    # new email does not. Same for the draft tools below.
     "send_email": (SCOPE_SEND,),
     "create_draft": (SCOPE_COMPOSE,),
     "update_draft": (SCOPE_COMPOSE,),
@@ -241,11 +241,10 @@ def _satisfies(required: str, granted: set[str]) -> bool:
 def granted_scope_satisfies(*, required: str, granted_scope: str) -> bool:
     """Public version of `_satisfies` over a raw granted-scope string.
 
-    send_draft uses this to decide whether the caller's granted
-    scope covers the gmail.modify requirement of the optional post-
-    send actions, before the send is dispatched. Returns True when
-    the required scope is directly granted or subsumed via
-    SCOPE_HIERARCHY.
+    The send and draft tools use this before dispatching a send: for the
+    gmail.modify that post-send actions need, and for the read access a
+    reply's thread lookup needs. Returns True when the required scope is
+    directly granted or subsumed via SCOPE_HIERARCHY.
     """
     return _satisfies(required, _granted_set(granted_scope))
 

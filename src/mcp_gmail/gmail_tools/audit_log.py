@@ -21,6 +21,8 @@ Approved fields
 - mime_type: when an attachment was downloaded (NOT the filename)
 - size_bytes: byte length of an attachment payload
 - error_code: ToolErrorCode integer when outcome != "ok"
+- reason: closed-set code for a threading refusal (reply_threading.REASON_*)
+- actual_thread_id: thread Gmail filed a message in, on a thread mismatch
 
 Explicitly NOT in the signature
 -------------------------------
@@ -88,6 +90,8 @@ def audit(
     mime_type: str | None = None,
     size_bytes: int | None = None,
     error_code: int | None = None,
+    reason: str | None = None,
+    actual_thread_id: str | None = None,
 ) -> None:
     """Emit one structured audit log line for a tool dispatch.
 
@@ -127,6 +131,10 @@ def audit(
         pairs.append(f"size_bytes={size_bytes}")
     if error_code is not None:
         pairs.append(f"error_code={error_code}")
+    if reason is not None:
+        pairs.append(f"reason={reason}")
+    if actual_thread_id is not None:
+        pairs.append(f"actual_thread_id={actual_thread_id}")
 
     line = " ".join(pairs)
 

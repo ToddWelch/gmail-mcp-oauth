@@ -105,5 +105,43 @@ ATTACHMENT_PROP: dict[str, Any] = {
 }
 
 
+# Shared by every tool that can put a reply on the wire or store one as a draft.
+REPLY_THREADING_NOTE: str = (
+    " Replies land in the original conversation or do not go out. For a reply, pass "
+    "reply_to_message_id: the Message-ID header of the message being replied to "
+    "(<id@host>, from read_email format=metadata), not Gmail's message id. The server "
+    "finds the thread itself and sets threadId, so no thread argument is needed. Refused "
+    "with nothing sent (error -32007, reason in data.error_data): the message is not in "
+    "this mailbox or matches more than one thread; the subject does not match it "
+    "(Re:/Fwd: prefixes, spacing and case are ignored); the subject starts with Re: but "
+    "there is no reply_to_message_id; the lookup fails; or the account lacks read access "
+    "(-32004). A new email with no reply_to_message_id needs no read access."
+)
+
+SEND_DRAFT_THREADING_NOTE: str = (
+    " Needs gmail.compose or read access to check the draft first, plus read access if it "
+    "is a reply. Refused with nothing sent (error -32007) if its In-Reply-To points at a "
+    "different thread than the draft's own, the target is not found, the subject does not "
+    "match, or the subject starts with Re: with no In-Reply-To. On a -32008 no post-send "
+    "action runs."
+)
+
+THREAD_MISMATCH_NOTE: str = (
+    " If Gmail reports a different thread after sending, the result is error -32008 with "
+    "both ids: the mail went out, so do not resend it."
+)
+
+SEND_RESULT_NOTE: str = THREAD_MISMATCH_NOTE + (
+    " If Gmail does not confirm the send (network error or 5xx), the result is error -32009: "
+    "it may have gone out, so check Sent before resending. A retry with the same "
+    "idempotency_key returns that error without sending."
+)
+
+UPDATE_DRAFT_THREADING_NOTE: str = (
+    " Updating a reply draft must pass reply_to_message_id or thread_id again; without "
+    "them the update is refused, because it would pull the draft out of its conversation."
+)
+
+
 LABEL_VISIBILITY_ENUM: list[str] = ["labelShow", "labelHide", "labelShowIfUnread"]
 MESSAGE_VISIBILITY_ENUM: list[str] = ["show", "hide"]

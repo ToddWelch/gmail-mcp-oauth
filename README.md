@@ -232,7 +232,13 @@ or if the new key is in `PRIOR_ENCRYPTION_KEYS`.
   supplied, the server dedupes calls in-process for 60 seconds. The
   cache key is `(auth0_sub, account_email, idempotency_key)`, so
   two distinct callers can use the same opaque key without
-  collision.
+  collision. Reusing a key for a different message is refused, and a
+  send Gmail did not confirm replays as an error instead of resending.
+- **A reply lands in its conversation or does not send.** With
+  `reply_to_message_id` the server finds the thread by searching the
+  mailbox and sets Gmail's `threadId` itself, then compares the thread
+  Gmail reports. Anything that cannot be threaded is refused with
+  nothing sent. See "Reply threading" in `docs/GMAIL_MCP_TOOLS.md`.
 - **Attachment size cap is 25 MiB on the FINAL encoded message
   size**, not on raw input bytes. Base64 inflates binary by ~33%,
   so raw attachment data caps at ~18 MiB. Enforced in

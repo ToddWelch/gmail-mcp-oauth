@@ -34,7 +34,7 @@ from . import config as config_module
 from . import db as db_module
 from . import health as health_module
 from .auth import warm_jwks
-from .logging_filters import install_redacting_filter
+from .logging_filters import install_redacting_filter, silence_http_client_url_logging
 
 logger = logging.getLogger("mcp_gmail")
 
@@ -170,6 +170,7 @@ async def lifespan(app: FastAPI):
     # fragments that show up there. Defense in depth: every callsite
     # MUST already avoid logging tokens; this catches accidents.
     install_redacting_filter()
+    silence_http_client_url_logging()
     logger.info(
         "mcp-gmail starting: resource=%s issuer=%s",
         settings.mcp_resource_url,
