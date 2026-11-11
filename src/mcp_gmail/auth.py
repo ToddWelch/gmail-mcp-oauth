@@ -40,10 +40,8 @@ REFRESH_THROTTLE_SECONDS = 30.0
 NEGATIVE_CACHE_TTL_SECONDS = 60.0
 NEGATIVE_CACHE_MAX_ENTRIES = 256
 
-# Checked before any parsing. PyJWT 2.15 decodes token segments with a per-byte
-# Python loop on the event loop, so an unauthenticated multi-megabyte bearer would
-# stall every other request while it is rejected. Auth0 access tokens run a few KB;
-# 16 KiB leaves wide headroom.
+# Bound the work done on unauthenticated input: refuse oversized bearers before any
+# parsing. Real Auth0 access tokens are about 1 KB, so 16 KiB leaves wide headroom.
 MAX_BEARER_TOKEN_CHARS = 16 * 1024
 
 

@@ -53,8 +53,7 @@ def _unsigned(header: dict) -> str:
 
 
 async def test_oversized_token_rejected_before_any_parsing(settings, monkeypatch):
-    """PyJWT parses with a per-byte Python loop on the event loop, so a huge
-    unauthenticated token must be refused before it is parsed at all."""
+    """Unauthenticated input past the cap is refused before it is parsed at all."""
 
     def must_not_parse(_token):
         raise AssertionError("an oversized token reached the JWT parser")
@@ -87,8 +86,8 @@ async def test_a_large_but_legitimate_token_at_the_limit_is_accepted(settings, s
     ],
 )
 async def test_header_errors_beyond_decode_errors_are_rejected_not_raised(settings, header):
-    """These raise PyJWT's parent InvalidTokenError, which used to escape as a 500
-    to anyone, with no credential needed."""
+    """These raise PyJWT's parent InvalidTokenError, which the handler used to miss,
+    so the request failed as an internal error instead of a 401."""
     with pytest.raises(AuthError) as excinfo:
         await validate_bearer_token(_unsigned(header), settings)
     assert excinfo.value.reason == "invalid_token"
