@@ -108,6 +108,29 @@ def test_mcp_invalid_bearer_returns_401(client):
     assert "WWW-Authenticate" in resp.headers
 
 
+@pytest.mark.parametrize(
+    "token",
+    [
+        # Unsupported critical extension: PyJWT's parent InvalidTokenError.
+        "eyJhbGciOiJSUzI1NiIsImtpZCI6ImsiLCJjcml0IjpbInp6eiJdfQ.e30.c2ln",
+        # Non-string kid.
+        "eyJhbGciOiJSUzI1NiIsImtpZCI6NX0.e30.c2ln",
+        # Far over the length cap.
+        "a" * (64 * 1024),
+    ],
+)
+def test_mcp_malformed_bearer_is_401_never_500(client, token):
+    """Each of these used to reach the client as a 500 with a traceback, or to
+    burn event-loop time parsing, with no credential required."""
+    resp = client.post(
+        "/mcp",
+        json={"jsonrpc": "2.0", "id": 1, "method": "ping"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 401
+    assert resp.json() == {"error": "invalid_token"}
+
+
 def test_mcp_wrong_scheme_returns_401(client):
     resp = client.post(
         "/mcp",

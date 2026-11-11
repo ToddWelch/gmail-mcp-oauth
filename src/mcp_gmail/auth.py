@@ -40,6 +40,12 @@ REFRESH_THROTTLE_SECONDS = 30.0
 NEGATIVE_CACHE_TTL_SECONDS = 60.0
 NEGATIVE_CACHE_MAX_ENTRIES = 256
 
+# Checked before any parsing. PyJWT 2.15 decodes token segments with a per-byte
+# Python loop on the event loop, so an unauthenticated multi-megabyte bearer would
+# stall every other request while it is rejected. Auth0 access tokens run a few KB;
+# 16 KiB leaves wide headroom.
+MAX_BEARER_TOKEN_CHARS = 16 * 1024
+
 
 class AuthError(Exception):
     """Raised when token validation fails. Carries a short reason code."""
@@ -138,11 +144,13 @@ async def _get_signing_key(token: str, settings: Settings) -> Any:
     """Return the public key matching the token's kid (hardened)."""
     try:
         header = jwt.get_unverified_header(token)
-    except jwt.exceptions.DecodeError as exc:
+    except jwt.InvalidTokenError as exc:
+        # The parent class, not just DecodeError: a bad `crit` or a non-string
+        # `kid` raises InvalidTokenError itself, which used to escape as a 500.
         raise AuthError("invalid_token", f"token is not a valid JWT: {exc}") from exc
     kid = header.get("kid")
-    if not kid:
-        raise AuthError("invalid_token", "token header has no kid")
+    if not kid or not isinstance(kid, str):
+        raise AuthError("invalid_token", "token header has no usable kid")
     if _negative_cache_hit(kid):
         raise AuthError("invalid_token", f"no JWKS key matches kid={kid}")
 
@@ -273,6 +281,10 @@ async def validate_bearer_token(token: str, settings: Settings) -> dict[str, Any
     """
     if not token:
         raise AuthError("invalid_token", "empty token")
+    if len(token) > MAX_BEARER_TOKEN_CHARS:
+        raise AuthError(
+            "invalid_token", f"token is {len(token)} chars, over the {MAX_BEARER_TOKEN_CHARS} limit"
+        )
 
     try:
         signing_key = await _get_signing_key(token, settings)
