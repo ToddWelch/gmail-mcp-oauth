@@ -11,6 +11,8 @@ returned to clients on rejection.
 
 from __future__ import annotations
 
+import base64
+import json
 import time
 
 import httpx
@@ -41,6 +43,53 @@ async def test_valid_token_accepted(settings, signed_jwt):
 async def test_empty_token_rejected(settings):
     with pytest.raises(AuthError) as excinfo:
         await validate_bearer_token("", settings)
+    assert excinfo.value.reason == "invalid_token"
+
+
+def _unsigned(header: dict) -> str:
+    """A token with a chosen header that never reaches signature checks."""
+    raw = json.dumps(header).encode()
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode() + ".e30.c2ln"
+
+
+async def test_oversized_token_rejected_before_any_parsing(settings, monkeypatch):
+    """Unauthenticated input past the cap is refused before it is parsed at all."""
+
+    def must_not_parse(_token):
+        raise AssertionError("an oversized token reached the JWT parser")
+
+    monkeypatch.setattr(auth_module.jwt, "get_unverified_header", must_not_parse)
+    token = "a" * (auth_module.MAX_BEARER_TOKEN_CHARS + 1)
+    with pytest.raises(AuthError) as excinfo:
+        await validate_bearer_token(token, settings)
+    assert excinfo.value.reason == "invalid_token"
+
+
+async def test_a_large_but_legitimate_token_at_the_limit_is_accepted(settings, signed_jwt):
+    """The cap must not reject a real token near it."""
+    limit = auth_module.MAX_BEARER_TOKEN_CHARS
+    token = signed_jwt({"pad": ""})
+    pad = (limit - len(token)) * 3 // 4  # base64 grows 3 bytes into 4 chars
+    while len(token := signed_jwt({"pad": "x" * pad})) > limit:
+        pad -= 1
+    assert limit - 4 <= len(token) <= limit
+    claims = await validate_bearer_token(token, settings)
+    assert claims["sub"] == "user-abc"
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        {"alg": "RS256", "kid": "test-kid-1", "crit": ["unknown-extension"]},
+        {"alg": "RS256", "kid": 5},
+        {"alg": "RS256", "kid": ["a", "b"]},
+    ],
+)
+async def test_header_errors_beyond_decode_errors_are_rejected_not_raised(settings, header):
+    """These raise PyJWT's parent InvalidTokenError, which the handler used to miss,
+    so the request failed as an internal error instead of a 401."""
+    with pytest.raises(AuthError) as excinfo:
+        await validate_bearer_token(_unsigned(header), settings)
     assert excinfo.value.reason == "invalid_token"
 
 
