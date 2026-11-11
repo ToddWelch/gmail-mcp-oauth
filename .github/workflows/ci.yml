@@ -1,5 +1,13 @@
 name: CI
 
+# Triggers: pull_request to main (the merge gate) and push to main (the post-merge
+# run). No push trigger on other branches, so a PR commit runs once. Merging to
+# main deploys on Railway, so the full suite runs on the pull request.
+#
+# Two jobs. "Lint and test" on 3.12 is the required check; its name is what the
+# main-protection ruleset requires, so don't rename it or turn it into a matrix.
+# "Test on Python 3.11" runs the same suite on the version production runs
+# (mcp.Dockerfile), installed from the same hash-pinned lock.
 on:
   push:
     branches: [main]
@@ -11,7 +19,8 @@ permissions:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # A newer push to a PR cancels the stale run; every run on main finishes.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   test:
@@ -41,6 +50,40 @@ jobs:
 
       - name: Ruff format check
         run: ruff format --check .
+
+      - name: Pytest
+        run: pytest
+
+  test-production-python:
+    name: Test on Python 3.11
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: requirements-dev.lock
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install --require-hashes -r requirements-dev.lock
+          pip install --no-deps -e .
+          pip check
+
+      # The deploy runs `alembic upgrade head` on boot (mcp.Dockerfile), and no
+      # test runs it without a Postgres URL. Offline mode renders every migration
+      # as SQL on production's Python without a database.
+      - name: Deploy migration, offline
+        env:
+          DATABASE_URL: postgresql://ci:offline@127.0.0.1:1/offline
+        run: alembic upgrade head --sql > /dev/null
 
       - name: Pytest
         run: pytest

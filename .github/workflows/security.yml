@@ -4,18 +4,27 @@ name: Security
 # main, matching the CI workflow's triggers. Kept separate from ci.yml so
 # the "Lint and test" job stays untouched and the scanner tooling (a Go
 # binary for Trivy, a Docker image build for the image scan) is isolated.
+#
+# Also weekly on main: new advisories land against unchanged code, and with only
+# PR and push triggers they surfaced only when the next PR opened. That is how
+# 3 CRITICAL and 7 HIGH sat unseen from July to November 2026 (PR #34). A red
+# scheduled run shows on the Actions tab and emails the repo owner.
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
+  schedule:
+    - cron: "17 7 * * 1"
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
   group: security-${{ github.ref }}
-  cancel-in-progress: true
+  # A newer push to a PR cancels the stale run; scans on main always finish.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -126,6 +135,8 @@ jobs:
         env:
           TRIVY_FILE_PATTERNS: 'pip:requirements.*\.lock'
 
+      # This image is built fresh with apt-get upgrade, so it is not the running
+      # image; on the weekly run the lockfile scan above is the drift detector.
       - name: Build production image
         run: docker build -f mcp.Dockerfile -t mcp-gmail:scan .
 
