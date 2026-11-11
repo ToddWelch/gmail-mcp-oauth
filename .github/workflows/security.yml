@@ -135,6 +135,8 @@ jobs:
         env:
           TRIVY_FILE_PATTERNS: 'pip:requirements.*\.lock'
 
+      # This image is built fresh with apt-get upgrade, so it is not the running
+      # image; on the weekly run the lockfile scan above is the drift detector.
       - name: Build production image
         run: docker build -f mcp.Dockerfile -t mcp-gmail:scan .
 

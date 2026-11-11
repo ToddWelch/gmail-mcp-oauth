@@ -77,5 +77,13 @@ jobs:
           pip install --no-deps -e .
           pip check
 
+      # The deploy runs `alembic upgrade head` on boot (mcp.Dockerfile), and no
+      # test runs it without a Postgres URL. Offline mode renders every migration
+      # as SQL on production's Python without a database.
+      - name: Deploy migration, offline
+        env:
+          DATABASE_URL: postgresql://ci:offline@127.0.0.1:1/offline
+        run: alembic upgrade head --sql > /dev/null
+
       - name: Pytest
         run: pytest
