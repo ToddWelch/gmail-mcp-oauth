@@ -59,6 +59,7 @@ from .lifespan import (
 )
 from .mcp_protocol import handle_jsonrpc
 from .middleware import BodySizeLimitMiddleware, ErrorEnvelopeMiddleware
+from .security_headers import SecurityHeadersMiddleware
 
 logger = logging.getLogger("mcp_gmail")
 
@@ -77,6 +78,9 @@ app = FastAPI(
 # is available to downstream handlers (mcp_protocol uses it).
 app.add_middleware(ErrorEnvelopeMiddleware)
 app.add_middleware(BodySizeLimitMiddleware)
+# Outermost of all, so every response gets the security headers, including a
+# 413 from BodySizeLimitMiddleware and a 500 from ErrorEnvelopeMiddleware.
+app.add_middleware(SecurityHeadersMiddleware)
 
 # Mount the Google OAuth flow routes (/oauth/start, /oauth2callback,
 # /oauth/status, /oauth/disconnect). Defined in a separate module so
