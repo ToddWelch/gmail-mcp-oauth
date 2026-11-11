@@ -1,5 +1,25 @@
 ## Session Log
 
+### 2026-11-11 - Review follow-ups: auth hardening, logging, security headers, CI and dependencies
+
+- Completed: Four PRs from the review findings of #33 and #34, each merged at its Crash Override-approved head and verified in production after deploy.
+  - **#40 (`d812a05`):** malformed token headers return 401 instead of an internal error, and bearer tokens over 16 KiB are refused before parsing.
+  - **#41 (`14bac03`):** access lines are back and no longer print a traceback per request (closes #36), and audit `error_code` is no longer redacted (closes #35).
+  - **#43 (`c064e62`):** `Strict-Transport-Security` and `Cache-Control: no-store` on every response (closes the ZAP issues #28 and #31).
+  - **#42 (`4dc3d5f`):** a `Test on Python 3.11` job that also renders the deploy migration offline; a weekly security scan; raised security floors; and idna, mako and soupsieve bumped to clear three Moderate advisories (closes #37).
+  - Opened #44 for pre-existing gaps the reviews found.
+- In progress: nothing.
+- Current state of the system: `main` and Railway `mcp-gmail` at `4dc3d5f`, deployment `SUCCESS`, booted cleanly on Python 3.11 with the new mako. Verified live after each deploy: a real connector call passed auth; malformed and oversized bearers got 401; access lines and `error_code=-32007` appear in the logs; both public endpoints carry the new headers.
+- **SAFETY-RELEVANT CHANGES, all live:**
+  - **Bearer tokens over 16 KiB are refused (401).** Real tokens are about 1 KB, and a real call passed.
+  - **Every response is `no-store`, with HSTS for a year.** No `includeSubDomains` or `preload`: those are a decision for a whole domain.
+  - **The access log now writes one line per request,** with secrets redacted inside each field.
+  - **The security workflow runs every Monday on main** and emails the repo owner when it fails.
+- Reviews: Crash Override approved each PR, and approved again after every head move: #40 at `ad5fddb`, #41 at `687ae07`, #42 at `65297a0` (re-reviewed, since its content changed), #43 at `af8cd06`. It also corrected my public wording on #40, which had overstated the production risk; Railway's edge caps headers at 32 KB. The cross-model gate did not fire for any of the four: none was a first write, a first post, a money path or a data path, and Crash Override called nothing material each time.
+- Next: Todd's decision on required checks. Five checks now run (`Lint and test`, `Test on Python 3.11`, Bandit, Semgrep, Trivy), and only `Lint and test` gates a merge. Recommended: require all five.
+- Open issues: #44 (JWKS-document shapes that can still return 500, auth detail logged with `%s`, the `uvicorn.error` handler gap, two untested filter lines, missing frame and nosniff headers, ZAP rule noise). Dependabot #30 will propose soupsieve 4.x; hold it to 2.x unless reviewed. Still open from the last entry: whether to run the gate on #34, and the old revision of the #33 comment.
+- Estimate vs actual: No estimate given. Roughly 1.5 hours agent compute for the four PRs, their reviews and the production checks.
+
 ### 2026-11-06 - Closeout: reply threading
 
 - Completed: PR #34 (`4893978`), PR #33 (`77c1e23`) and PR #38 (`aa4a1f0`) merged and deployed. Issues #35, #36 and #37 filed. The next entry down holds the detail of the fix, and this one corrects what it left out.
