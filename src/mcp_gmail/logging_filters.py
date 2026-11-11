@@ -113,8 +113,15 @@ SENSITIVE_KEYS = (
 )
 
 # Matches `key=value` (form-encoded). value runs to & or whitespace.
+# Keys still match inside longer names (the safe, over-redacting direction), with
+# two named exceptions: the audit line's `error_code=-32007` and an HTTP
+# `status_code=` are not OAuth codes, and redacting them hid every error code from
+# production logs (issue #35).
+_FORM_KEYS = tuple(
+    r"(?<!error_)(?<!status_)code" if key == "code" else re.escape(key) for key in SENSITIVE_KEYS
+)
 KV_FORM = re.compile(
-    r"(?P<key>" + "|".join(SENSITIVE_KEYS) + r")=(?P<val>[^&\s\"',]+)",
+    r"(?P<key>" + "|".join(_FORM_KEYS) + r")=(?P<val>[^&\s\"',]+)",
     re.IGNORECASE,
 )
 
@@ -188,6 +195,30 @@ class RedactingFilter(logging.Filter):
         return True
 
 
+class ArgPreservingRedactingFilter(RedactingFilter):
+    """RedactingFilter for records whose formatter needs the args tuple intact.
+
+    uvicorn's access formatter unpacks exactly five positional args, so the
+    parent's collapse of args into one string made every access line fail with
+    a traceback and disappear (issue #36). This redacts each string arg in
+    place and keeps the tuple's shape; non-string args such as the status code
+    pass through. Every other logger keeps the parent's collapse.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if not isinstance(record.args, tuple) or not record.args:
+            return super().filter(record)
+        try:
+            record.args = tuple(_redact(a) if isinstance(a, str) else a for a in record.args)
+            if isinstance(record.msg, str):
+                record.msg = _redact(record.msg)
+        except Exception:
+            # Same fail-safe as the parent: never let an unredacted record through.
+            record.msg = "<redaction-error>"
+            record.args = ()
+        return True
+
+
 class AccessLogQueryStringScrubber(logging.Filter):
     """: drop query strings from /oauth/* uvicorn access logs.
 
@@ -256,17 +287,19 @@ def install_redacting_filter() -> None:
         if not any(isinstance(f, RedactingFilter) for f in handler.filters):
             handler.addFilter(RedactingFilter())
 
-    # uvicorn.access carries the path?query positional.
+    # uvicorn.access carries the path?query positional. Its records need the
+    # arg-preserving redactor: uvicorn's AccessFormatter unpacks exactly five args,
+    # and collapsing them broke every access line with a traceback (issue #36).
     access = logging.getLogger("uvicorn.access")
     if not any(isinstance(f, AccessLogQueryStringScrubber) for f in access.filters):
         access.addFilter(AccessLogQueryStringScrubber())
-    if not any(isinstance(f, RedactingFilter) for f in access.filters):
-        access.addFilter(RedactingFilter())
+    if not any(isinstance(f, ArgPreservingRedactingFilter) for f in access.filters):
+        access.addFilter(ArgPreservingRedactingFilter())
     for handler in access.handlers:
         if not any(isinstance(f, AccessLogQueryStringScrubber) for f in handler.filters):
             handler.addFilter(AccessLogQueryStringScrubber())
-        if not any(isinstance(f, RedactingFilter) for f in handler.filters):
-            handler.addFilter(RedactingFilter())
+        if not any(isinstance(f, ArgPreservingRedactingFilter) for f in handler.filters):
+            handler.addFilter(ArgPreservingRedactingFilter())
 
     # uvicorn.error covers startup tracebacks + exception paths.
     error = logging.getLogger("uvicorn.error")
