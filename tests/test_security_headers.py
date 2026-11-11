@@ -55,12 +55,12 @@ def test_every_response_carries_both_headers(client, method, path):
     assert resp.headers["cache-control"] == NO_STORE
 
 
-def test_hsts_does_not_claim_the_shared_railway_domain(client):
-    """includeSubDomains on *.up.railway.app would govern other tenants' apps."""
-    assert (
-        "includesubdomains"
-        not in client.get("/health").headers["strict-transport-security"].lower()
-    )
+def test_hsts_leaves_subdomains_and_preload_to_a_whole_domain_decision(client):
+    """Served from an apex domain, includeSubDomains would force every subdomain
+    under it onto HTTPS for a year, and preload is slow to undo."""
+    hsts = client.get("/health").headers["strict-transport-security"].lower()
+    assert "includesubdomains" not in hsts
+    assert "preload" not in hsts
 
 
 def test_a_413_from_the_body_cap_carries_the_headers(client, monkeypatch):

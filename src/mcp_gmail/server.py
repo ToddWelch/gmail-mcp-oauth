@@ -78,8 +78,10 @@ app = FastAPI(
 # is available to downstream handlers (mcp_protocol uses it).
 app.add_middleware(ErrorEnvelopeMiddleware)
 app.add_middleware(BodySizeLimitMiddleware)
-# Outermost of all, so every response gets the security headers, including a
-# 413 from BodySizeLimitMiddleware and a 500 from ErrorEnvelopeMiddleware.
+# Outermost of the app's own middleware, so the security headers reach a 413 from
+# BodySizeLimitMiddleware and a 500 from ErrorEnvelopeMiddleware. Starlette's
+# ServerErrorMiddleware still sits outside it, so a 500 raised by one of these
+# middlewares themselves goes out without them.
 app.add_middleware(SecurityHeadersMiddleware)
 
 # Mount the Google OAuth flow routes (/oauth/start, /oauth2callback,

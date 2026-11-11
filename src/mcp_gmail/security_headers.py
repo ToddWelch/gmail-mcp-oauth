@@ -5,8 +5,10 @@ two things on every page:
 
 - No Strict-Transport-Security. Railway terminates TLS, and the header tells
   browsers to refuse a plain-HTTP downgrade for a year. includeSubDomains is
-  deliberately absent: production runs on a shared *.up.railway.app domain whose
-  other subdomains are not this service's to govern.
+  deliberately absent. It would only cover names below this host, so it adds
+  nothing here, and if this service ever moves to an apex domain it would force
+  every subdomain under it onto HTTPS for a year. Add it, or preload, only as a
+  decision for the whole domain.
 - Storable and cacheable content. This is an OAuth and token-handling server:
   consent pages, callback results and API responses must never sit in a shared
   or browser cache, so the default is `Cache-Control: no-store`.
