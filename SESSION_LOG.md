@@ -1,5 +1,21 @@
 ## Session Log
 
+### 2026-11-18 - soupsieve CVE fix, all five checks required
+
+- Completed:
+  - **#46 (`8c0c42e`):** the weekly Trivy scan on main went red on 2026-11-16 with two HIGH findings in soupsieve 2.10 (CVE-2026-126190, CVE-2026-126191). The floor is now `soupsieve>=4.0`, and both locks moved 2.10 -> 4.1.1 and nothing else. Neither flaw was reachable: only bs4's CSS `select()` calls soupsieve, and nothing here uses it. A runtime call trace in review confirmed this.
+  - **Ruleset `main-protection`:** all five checks are now required: `Lint and test`, `Test on Python 3.11`, `Bandit SAST (Python)`, `Semgrep SAST (cross-language)` and `Trivy (deps + container)`. Strict is on and the bypass list is empty. This follows the standing rule that High scanner findings block a merge.
+  - Two review nits from #46 are added to #44 as items 7 and 8.
+- In progress: nothing.
+- Current state of the system: `main` and Railway `mcp-gmail` at `8c0c42e`, deployment `SUCCESS`, booted cleanly. Verified live: a real `read_email` with `format=text` on an HTML-only message came back as `text_source: text/html`, which ran markdownify -> bs4 on the new soupsieve.
+- **SAFETY-RELEVANT CHANGE:** any PR into main now waits on all five checks. A new HIGH CVE in a dependency turns Trivy red and blocks every merge until the lock is bumped, by design.
+- **DEADLINE, 2026-12-01: Railway stops reading `railway.toml`.** This service's `railway.toml` sets `builder = "dockerfile"` and `dockerfilePath = "mcp.Dockerfile"`. The running deployment is unaffected, but Railway's docs don't say what the first deploy after the cutoff does without that file. Eleven repos under ~/projects have a `railway.toml`. That makes it a cross-project migration (`railway config migrate`, then `cutover`), so it is not done here. SURFACE TO ADVISORY: handed over through Brain.
+- Supersedes the 2026-11-11 entry: Dependabot #30's soupsieve 4.x is no longer held, since main is now on 4.1.1, and #30 needs a rebase onto these lock lines. The required-checks decision is done. Dependabot #32, which jumps Python 3.11 -> 3.15, still needs a real review before any merge.
+- Reviews: Crash Override approved #46 at `10d6bf0`, with no blocking findings; merged at that head with all five checks green. Cross-model gate: did not fire, because this was no first write, first post, money path or data path, and the reviewer named nothing material.
+- Next: none for this repo. The Railway migration is the advisory session's to schedule before 2026-12-01.
+- Open issues: #44 (now 8 items). Still open from 11-06: whether to run the gate on #34, and the old revision of the #33 comment.
+- Estimate vs actual: No estimate given. Roughly 30 minutes of agent compute.
+
 ### 2026-11-11 - Review follow-ups: auth hardening, logging, security headers, CI and dependencies
 
 - Completed: Four PRs from the review findings of #33 and #34, each merged at its Crash Override-approved head and verified in production after deploy.
