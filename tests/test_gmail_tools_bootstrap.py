@@ -79,9 +79,9 @@ def test_connect_gmail_account_description_advertises_relink_vocabulary():
         assert term in desc, f"description missing capability term: {term}"
 
 
-def test_total_tool_count_is_thirty_three():
-    """The upload-slot tool bumps the tool surface to 33 (32 + 1)."""
-    assert len(TOOL_DEFINITIONS) == 33
+def test_total_tool_count_is_thirty_four():
+    """read_attachment_text bumps the tool surface to 34 (33 + 1)."""
+    assert len(TOOL_DEFINITIONS) == 34
 
 
 def test_connect_gmail_account_schema_requires_account_email():

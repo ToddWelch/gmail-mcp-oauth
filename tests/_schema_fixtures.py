@@ -7,7 +7,7 @@ to the manifest without a fixture entry here breaks that test, which
 is the intended drift surface.
 
 Lives in a sibling test-data module rather than inline in
-`test_schema_validation.py` because the 33 fixtures push the test
+`test_schema_validation.py` because the 34 fixtures push the test
 module over the 300 LOC project rule even after trimming.
 """
 
@@ -25,10 +25,15 @@ EMAIL = "user@example.com"
 
 
 HAPPY_FIXTURES: dict[str, dict] = {
-    # Read tools (8 message+thread + 3 labels/filters)
+    # Read tools (9 message+thread + 3 labels/filters)
     "read_email": {"account_email": EMAIL, "message_id": GMAIL_ID, "format": "full"},
     "search_emails": {"account_email": EMAIL, "q": "from:boss"},
     "download_attachment": {
+        "account_email": EMAIL,
+        "message_id": GMAIL_ID,
+        "attachment_id": ATTACH_ID,
+    },
+    "read_attachment_text": {
         "account_email": EMAIL,
         "message_id": GMAIL_ID,
         "attachment_id": ATTACH_ID,

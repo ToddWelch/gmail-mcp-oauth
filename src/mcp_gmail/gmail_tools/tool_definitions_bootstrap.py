@@ -67,7 +67,7 @@ TOOL_DEFINITIONS_BOOTSTRAP: list[dict[str, Any]] = [
 
 
 # Sanity check at the bootstrap-side level: 1 entry. The composite
-# 33 total-tool assertion lives in __init__.py.
+# 34 total-tool assertion lives in __init__.py.
 assert len(TOOL_DEFINITIONS_BOOTSTRAP) == 1, (
     f"tool_definitions_bootstrap.py must have 1 entry, got {len(TOOL_DEFINITIONS_BOOTSTRAP)}"
 )

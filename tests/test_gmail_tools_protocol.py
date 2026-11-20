@@ -1,9 +1,9 @@
 """Tests for the mcp_protocol layer wiring of gmail_tools.
 
-The protocol's tools/list MUST return the 25 tools (11 read + 14
-write). tools/call routes by name to dispatch_tool_call and returns
-either a JSON-RPC success result (with content blocks) or an error
-envelope.
+The protocol's tools/list MUST return the full 34-tool surface
+(12 read + 19 write + 1 bootstrap + 2 fanout extras). tools/call
+routes by name to dispatch_tool_call and returns either a JSON-RPC
+success result (with content blocks) or an error envelope.
 """
 
 from __future__ import annotations
@@ -16,18 +16,19 @@ from mcp_gmail import mcp_protocol
 
 
 @pytest.mark.asyncio
-async def test_tools_list_returns_thirty_three_tools():
-    """All four manifests combine to advertise 33 tools
-    (11 read + 19 write + 1 bootstrap + 2 fanout extras)."""
+async def test_tools_list_returns_thirty_four_tools():
+    """All four manifests combine to advertise 34 tools
+    (12 read + 19 write + 1 bootstrap + 2 fanout extras)."""
     msg = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
     response = await mcp_protocol.handle_jsonrpc(msg)
     assert response is not None
     assert "result" in response
     tools = response["result"]["tools"]
-    assert len(tools) == 33
+    assert len(tools) == 34
     names = [t["name"] for t in tools]
     # Read tools
     assert "read_email" in names
+    assert "read_attachment_text" in names
     assert "list_email_labels" in names
     # Write tools
     assert "create_attachment_upload_slot" in names

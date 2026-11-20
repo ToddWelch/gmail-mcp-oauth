@@ -2,9 +2,9 @@
 
 Called from mcp_protocol.py's tools/call branch. The function
 `dispatch_tool_call` is the single entry point for every tool;
-TOOL_DEFINITIONS lists the 11 tools available, and the
+TOOL_DEFINITIONS lists the 34 tools available, and the
 dispatcher routes by name (via tool_router.route_tool) to the
-appropriate read-side helper.
+appropriate read-side or write-side helper.
 
 Session boundaries
 ------------------------------------------------
